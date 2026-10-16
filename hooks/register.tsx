@@ -199,12 +199,12 @@ export const register: Register = on => {
       return (
         <Box flexDirection="row" alignItems="center" flexWrap="wrap" columnGap="sm">
           {parts.flatMap((part, index) => [
-            ...(index === 0 ? [] : [<Text key={`divider-${part.name}`} size="footnote" dimColor>│</Text>]),
+            ...(index === 0 ? [] : [<Text key={`divider-${part.name}`} size="body" dimColor>│</Text>]),
             // A small inset before 컨텍스트 alone, off the band's left edge.
-            <Box key={part.name} flexDirection="row" alignItems="center" gap="sm" {...(index === 0 ? { marginLeft: 'xs' as const } : {})}>
-              <Text size="footnote" dimColor>{part.name}</Text>
+            <Box key={part.name} flexDirection="row" alignItems="center" gap="sm" {...(index === 0 ? { marginLeft: 0.25 } : {})}>
+              <Text size="body" dimColor>{part.name}</Text>
               <Svg source={barSvg(part.percent, levelOf(part.percent))} alt={`${part.name} ${part.text}`} width={BAR_WIDTH} height={BAR_HEIGHT} />
-              <Text size="footnote" dimColor>{part.text}</Text>
+              <Text size="body" dimColor>{part.text}</Text>
             </Box>,
           ])}
         </Box>
