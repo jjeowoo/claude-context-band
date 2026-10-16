@@ -8,6 +8,8 @@ const alerted = atom({ plugin: 'context-band', key: 'alerted' } as const, 0)
 const limits = atom({ plugin: 'context-band', key: 'limits' } as const, null as LimitsReading | null)
 // Bumped every minute so the reset countdowns redraw.
 const minute = atom({ plugin: 'context-band', key: 'minute' } as const, 0)
+// Whether the session runs in a git worktree; null until checked.
+const worktree = atom({ plugin: 'context-band', key: 'worktree' } as const, null as boolean | null)
 
 // The limits are the account's, not the session's: the last reading any session got is kept
 // across sessions, so a session that has had no response yet still shows them.
@@ -128,6 +130,24 @@ async function estimate($: EngineInterface): Promise<ContextFill | null> {
   return null
 }
 
+// A worktree's repository root is the main working tree's, and its own `.git` is a file, not a folder.
+async function inWorktree($: EngineInterface): Promise<boolean> {
+  try {
+    const repo = await $.session.repo()
+    if (repo === null) {
+      return false
+    }
+    const root = await $.session.root()
+    const norm = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    if (norm(repo.root) === norm(root)) {
+      return false
+    }
+    return (await $.fs.stat(`${root}/.git`)).kind === 'file'
+  } catch {
+    return false
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
@@ -142,6 +162,8 @@ export const register: Register = on => {
       // No reading yet: the stored one stands until the first response.
     }
     await takeLimits($, live)
+    const isWorktree = await inWorktree($)
+    await update($, worktree, () => isWorktree)
     // Each minute: redraw the countdowns, and take a newer reading another session stored.
     $.clock.every(60_000, () => {
       void takeLimits($).then(() => update($, minute, n => n + 1))
@@ -188,7 +210,9 @@ export const register: Register = on => {
       parts.push({ name: '컨텍스트', percent: current.percent, text: label })
     }
     parts.push(...limitParts(reading?.list ?? [], await $.clock.now()))
-    if (parts.length === 0) {
+    // Checked here when the session opened without a fresh start.
+    const isWorktree = (await read($, worktree)) ?? (await inWorktree($))
+    if (parts.length === 0 && !isWorktree) {
       return next(e)
     }
 
@@ -197,7 +221,7 @@ export const register: Register = on => {
     if (e.surface === 'desktop') {
       const { Box, Text, Svg } = $.ui.resolve(e)
       return (
-        <Box flexDirection="row" alignItems="center" flexWrap="wrap" columnGap="sm">
+        <Box flexDirection="row" alignItems="center" flexWrap="wrap" columnGap="xs">
           {parts.flatMap((part, index) => [
             ...(index === 0 ? [] : [<Text key={`divider-${part.name}`} size="body" dimColor>│</Text>]),
             // A small inset before 컨텍스트 alone, off the band's left edge.
@@ -207,6 +231,13 @@ export const register: Register = on => {
               <Text size="body" dimColor>{part.text}</Text>
             </Box>,
           ])}
+          {/* The divider and the tag wrap together, so no divider is left at a row's end. */}
+          {isWorktree ? (
+            <Box key="worktree" flexDirection="row" alignItems="center" columnGap="xs">
+              {parts.length === 0 ? null : <Text size="body" dimColor>│</Text>}
+              <Text size="body" dimColor>워크트리</Text>
+            </Box>
+          ) : null}
         </Box>
       )
     }
@@ -225,6 +256,10 @@ export const register: Register = on => {
             </Text>,
           ]
         })}
+        {isWorktree ? [
+          ...(parts.length === 0 ? [] : [<Text key="divider-worktree" dimColor>│</Text>]),
+          <Text key="worktree" dimColor>워크트리</Text>,
+        ] : null}
       </Box>
     )
   })

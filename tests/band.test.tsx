@@ -63,3 +63,30 @@ test('a session with no reading of its own shows the last one another session st
   expect(await ui.find({ type: 'Text', text: /12% 사용/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('ends the band with 워크트리 when the session runs in a git worktree', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on)
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  on('session.repo', () => ({ value: { root: 'C:\repo', remote: null, internal: false, name: null } }))
+  on('session.root', () => ({ value: 'C:\repo\.claude\worktrees\abc' }))
+  on('fs.stat', () => ({ value: { kind: 'file', size: 40, mtimeMs: 0, isLink: false } }))
+  await $.session.measure({ context: { tokens: 20000, window: 200000, percent: 10 }, rateLimits: [], changed: ['context'] })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'context-band', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 9 } } as any })
+    expect(await ui.find({ type: 'Text', text: '워크트리' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('shows no worktree tag in the main checkout', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on)
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  on('session.repo', () => ({ value: { root: 'C:\repo', remote: null, internal: false, name: null } }))
+  on('session.root', () => ({ value: 'C:/repo/' }))
+  await $.session.measure({ context: { tokens: 20000, window: 200000, percent: 10 }, rateLimits: [], changed: ['context'] })
+  const ui = await $.ui.mount({ plugin: 'context-band', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 9 } } as any })
+  expect(await ui.find({ type: 'Text', text: '워크트리' })).toBeUndefined()
+  await ui.unmount()
+})

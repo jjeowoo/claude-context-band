@@ -5,6 +5,6 @@ export type LimitsReading = { at: number; list: RateLimit[] }
 
 declare module 'claude-code' {
   interface PluginState {
-    'context-band': { fill: ContextFill | null; alerted: number; limits: LimitsReading | null; minute: number }
+    'context-band': { fill: ContextFill | null; alerted: number; limits: LimitsReading | null; minute: number; worktree: boolean | null }
   }
 }
