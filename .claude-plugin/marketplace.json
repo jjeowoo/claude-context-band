@@ -1,0 +1,6 @@
+{
+  "name": "claude-context-band",
+  "description": "Context usage band above the Claude Code prompt",
+  "owner": { "name": "jjeowoo" },
+  "plugins": [{ "name": "context-band", "source": "./" }]
+}
