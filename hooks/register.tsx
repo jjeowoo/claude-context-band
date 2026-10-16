@@ -49,6 +49,14 @@ function untilText(at: number, now: number): string {
   return ` (${span} 후 재설정)`
 }
 
+// The weekly reset as a weekday and a 24-hour time in the person's own time zone:
+// " (금요일 03:00 재설정)".
+function resetAtText(at: number): string {
+  const d = new Date(at)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return ` (${'일월화수목금토'[d.getDay()]}요일 ${pad(d.getHours())}:${pad(d.getMinutes())} 재설정)`
+}
+
 // A window whose reset has passed since the reading is dropped: its figure no longer holds.
 function limitParts(list: RateLimit[], now: number): Part[] {
   const rank = (kind: string) => LIMIT_ORDER.indexOf(kind) + 1 || 99
@@ -59,7 +67,7 @@ function limitParts(list: RateLimit[], now: number): Part[] {
     parts.push({
       name: LIMIT_LABELS[l.kind] ?? l.kind,
       percent: l.percentUsed,
-      text: `${Math.round(l.percentUsed)}% 사용` + (Number.isNaN(at) ? '' : untilText(at, now)),
+      text: `${Math.round(l.percentUsed)}% 사용` + (Number.isNaN(at) ? '' : l.kind === 'seven_day' ? resetAtText(at) : untilText(at, now)),
     })
   }
   return parts

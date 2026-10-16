@@ -34,7 +34,8 @@ test('adds the session and weekly limits with their reset countdowns', async ($,
   await $.session.measure({
     context: { tokens: 294000, window: 1000000, percent: 29 },
     rateLimits: [
-      { kind: 'seven_day', percentUsed: 22, resetsAt: at((2 * 24 * 60 + 5 * 60 + 10) * 60000 + 30000) },
+      // Friday 03:00 in the machine's own time zone, a week on: shown as a time, not a countdown.
+      { kind: 'seven_day', percentUsed: 22, resetsAt: new Date(2026, 9, 23, 3, 0).toISOString() },
       { kind: 'five_hour', percentUsed: 5, resetsAt: at((4 * 60 + 23) * 60000 + 30000) },
     ],
     changed: ['context', 'rateLimits'],
@@ -43,7 +44,7 @@ test('adds the session and weekly limits with their reset countdowns', async ($,
     const ui = await $.ui.mount({ plugin: 'context-band', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 9 } } as any })
     expect(await ui.find({ type: 'Text', text: /29% 사용 \(294k \/ 1000k\)/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /5% 사용 \(4시간 23분 후 재설정\)/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /22% 사용 \(2일 5시간 후 재설정\)/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /22% 사용 \(금요일 03:00 재설정\)/ })).toBeDefined()
     await ui.unmount()
   }
 })
