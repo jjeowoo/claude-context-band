@@ -18,7 +18,7 @@ const BAR_CELLS = 10
 const BAR_WIDTH = 64
 const BAR_HEIGHT = 6
 const FILL_COLORS = { normal: '#8b8f98', warning: '#d9922e', error: '#d9534f' }
-const LIMIT_LABELS: Record<string, string> = { five_hour: '5시간', seven_day: '주간', spend_limit: '지출' }
+const LIMIT_LABELS: Record<string, string> = { five_hour: '세션', seven_day: '주간', spend_limit: '지출' }
 const LIMIT_ORDER = ['five_hour', 'seven_day', 'spend_limit']
 
 type Level = keyof typeof FILL_COLORS
