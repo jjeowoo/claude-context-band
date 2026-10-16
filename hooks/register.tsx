@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
 import type { ContextFill } from '../types'
 
@@ -23,24 +23,30 @@ function formatTokens(n: number): string {
   return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
 }
 
+// The live figure once the session has had a response; before that, a local estimate
+// (`breakdown: 'summary'` sends no request). Null when neither is available.
+async function estimate($: EngineInterface): Promise<ContextFill | null> {
+  try {
+    const { context } = await $.session.usage()
+    if (context.percent !== undefined) {
+      return { tokens: context.tokens, window: context.window, percent: context.percent }
+    }
+    const b = (await $.session.usage({ breakdown: 'summary' })).context.breakdown
+    if (b !== undefined) {
+      return { tokens: b.totalTokens, window: b.rawMaxTokens, percent: Math.round(b.percentage) }
+    }
+  } catch {
+    // No session bound yet: the first response fills it in through session.measure.
+  }
+  return null
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
-    const { context } = await $.session.usage()
-    if (context.percent !== undefined) {
-      await update($, fill, () => ({ tokens: context.tokens, window: context.window, percent: context.percent }))
-      return result
-    }
-
-    // No API response yet (fresh start or restart): estimate locally, which sends no request.
-    try {
-      const { context: estimated } = await $.session.usage({ breakdown: 'summary' })
-      const b = estimated.breakdown
-      if (b !== undefined) {
-        await update($, fill, () => ({ tokens: b.totalTokens, window: b.rawMaxTokens, percent: Math.round(b.percentage) }))
-      }
-    } catch {
-      // The first response fills it in through session.measure.
+    const estimated = await estimate($)
+    if (estimated !== null) {
+      await update($, fill, () => estimated)
     }
     return result
   })
@@ -65,8 +71,13 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const current = await read($, fill)
-    if (e.props.hasSurvey || current === null || current.percent === undefined) {
+    if (e.props.hasSurvey) {
+      return next(e)
+    }
+    // A session opened without a fresh start (unarchived, resumed) may not have filled it yet.
+    const stored = await read($, fill)
+    const current = stored?.percent !== undefined ? stored : await estimate($)
+    if (current === null || current.percent === undefined) {
       return next(e)
     }
 
