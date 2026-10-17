@@ -10,6 +10,12 @@ const limits = atom({ plugin: 'context-band', key: 'limits' } as const, null as 
 const minute = atom({ plugin: 'context-band', key: 'minute' } as const, 0)
 // The branch checked out where the session runs; null until checked.
 const branch = atom({ plugin: 'context-band', key: 'branch' } as const, null as BranchReading | null)
+// Ids of the background commands, monitors and remote agents the main loop started and that
+// have not ended; seen as they start, so ones started before the mod loaded are missing.
+const background = atom({ plugin: 'context-band', key: 'background' } as const, [] as string[])
+// Ids of the session's own agents still at work, read from its record of them, so ones started
+// before the mod loaded count too; null until read.
+const agents = atom({ plugin: 'context-band', key: 'agents' } as const, null as string[] | null)
 
 // The limits are the account's, not the session's: the last reading any session got is kept
 // across sessions, so a session that has had no response yet still shows them.
@@ -17,7 +23,7 @@ const STORE_KEY = 'limits'
 
 const THRESHOLDS = [90, 75]
 const BAR_CELLS = 10
-const BAR_WIDTH = 48
+const BAR_WIDTH = 37
 // The shorter bar a desktop band takes once every detail is gone and it still does not fit.
 const BAR_NARROW_WIDTH = 32
 const BAR_HEIGHT = 6
@@ -43,8 +49,8 @@ const DETAIL_RANKS: Record<string, number> = { seven_day: 2, five_hour: 3 }
 const USE = ' 사용'
 // What a desktop band shows at a given width, from the whole of it to the least, each step giving
 // up one thing more: the token counts, the weekly reset, the word 사용, the session's countdown,
-// shorter bars, the bars, and the item names. The percents and the branch always stay:
-// "14% │ 6% │ 12% │ main" is the least a band shows.
+// shorter bars, the bars, and the item names. The percents and the tags (the branch, the
+// background count) always stay: "14% │ 6% │ 12% │ main │ bg (0)" is the least a band shows.
 // `detailsDropped`: the details of that rank and below are left out.
 type Fit = { barWidth: number; detailsDropped: number; showsUse: boolean; showsNames: boolean }
 const FITS: Fit[] = [
@@ -85,7 +91,7 @@ function cellsOf(text: string): number {
 
 // The fullest band that fits `columns`, its width in pixels estimated from the texts and bars it
 // would draw; the least of them when none does.
-function fitFor(parts: Part[], branchName: string | null, columns: number): Fit {
+function fitFor(parts: Part[], tags: string[], columns: number): Fit {
   for (const fit of FITS) {
     let px = SPARE_PX
     parts.forEach((part, index) => {
@@ -95,9 +101,9 @@ function fitFor(parts: Part[], branchName: string | null, columns: number): Fit 
       px += fit.showsNames ? cellsOf(part.name) * TEXT_CELL_PX + GAP_PX : 0
       px += fit.barWidth === 0 ? 0 : fit.barWidth + GAP_PX
     })
-    if (branchName !== null) {
-      px += (parts.length === 0 ? 0 : DIVIDER_PX) + cellsOf(branchName) * TEXT_CELL_PX
-    }
+    tags.forEach((tag, index) => {
+      px += (parts.length === 0 && index === 0 ? 0 : DIVIDER_PX) + cellsOf(tag) * TEXT_CELL_PX
+    })
     if (px <= columns * COLUMN_PX) {
       return fit
     }
@@ -262,6 +268,49 @@ async function takeBranch($: EngineInterface): Promise<void> {
   }
 }
 
+// The background task a tool call started that the session's agent record does not hold: a
+// background or Ctrl+B'd command, a monitor, a remote agent.
+function startedTask(tool: string, result: unknown): string | undefined {
+  if (typeof result !== 'object' || result === null) {
+    return undefined
+  }
+  const r = result as Record<string, unknown>
+  const id = tool === 'Bash' ? r.backgroundTaskId
+    : tool === 'Monitor' ? r.taskId
+    : tool === 'Agent' && r.status === 'remote_launched' ? r.taskId
+    : undefined
+  return typeof id === 'string' && id !== '' ? id : undefined
+}
+
+const AT_WORK = ['pending', 'running', 'waiting']
+
+// The main loop's agents still at work: what the background tasks pane lists at its top level.
+async function liveAgents($: EngineInterface): Promise<string[]> {
+  try {
+    return (await $.agent.list()).filter(a => a.parentId === undefined && AT_WORK.includes(a.status)).map(a => a.id)
+  } catch {
+    return []
+  }
+}
+
+async function takeAgents($: EngineInterface): Promise<void> {
+  const ids = await liveAgents($)
+  const current = await read($, agents)
+  if (current === null || current.join() !== ids.join()) {
+    await update($, agents, () => ids)
+  }
+}
+
+// The tasks a notification row says have ended: each <task-id> with an ending <status> after it.
+function endedTasks(content: unknown): string[] {
+  const text = typeof content === 'string' ? content : JSON.stringify(content)
+  const ended: string[] = []
+  for (const m of text.matchAll(/<task-id>([^<]+)<\/task-id>(?:(?!<task-id>)[\s\S])*?<status>(completed|failed|killed|stopped)<\/status>/g)) {
+    ended.push(m[1].trim())
+  }
+  return ended
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
@@ -277,11 +326,16 @@ export const register: Register = on => {
     }
     await takeLimits($, live)
     await takeBranch($)
+    await takeAgents($)
     // Each minute: redraw the countdowns, take a newer reading another session stored,
     // and catch a branch switched outside the session.
     $.clock.every(60_000, () => {
       void takeLimits($).then(() => update($, minute, n => n + 1))
       void takeBranch($)
+    })
+    // Every five seconds: agents start and end with no event of their own to say so.
+    $.clock.every(5_000, () => {
+      void takeAgents($).catch(() => {})
     })
     return result
   })
@@ -308,11 +362,45 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // These sit in the path of every call and row: what they keep for the band is caught, so a slip
+  // there never fails the call or the row.
+
   // A command the model runs may switch the branch: read it again once the command is done.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const result = await next(e)
-    await takeBranch($)
+    await takeBranch($).catch(() => {})
     return result
+  })
+
+  // Background tasks: counted in when a main-loop call starts one, out when TaskStop ends one.
+  on('tool.call', async ($, e, next) => {
+    const result = await next(e)
+    if (result.result !== undefined && result.isError !== true && e.agentId === undefined) {
+      const started = startedTask(e.tool, result.result)
+      if (started !== undefined) {
+        await update($, background, ids => (ids.includes(started) ? ids : [...ids, started])).catch(() => {})
+      }
+      const stopped = e.tool === 'TaskStop' ? (result.result as { task_id?: unknown }).task_id : undefined
+      if (typeof stopped === 'string') {
+        await update($, background, ids => ids.filter(id => id !== stopped)).catch(() => {})
+      }
+    }
+    if (e.tool === 'Agent' || e.tool === 'TaskStop') {
+      await takeAgents($).catch(() => {})
+    }
+    return result
+  })
+
+  // ...and out when its notification says it ended.
+  on('session.append', async ($, e, next) => {
+    if (e.origin.kind === 'task-notification') {
+      const ended = endedTasks(e.message.content)
+      if (ended.length > 0) {
+        await update($, background, ids => ids.filter(id => !ended.includes(id))).catch(() => {})
+      }
+      await takeAgents($).catch(() => {})
+    }
+    return next(e)
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -339,16 +427,16 @@ export const register: Register = on => {
     parts.push(...limitParts(reading?.list ?? [], await $.clock.now()))
     // Checked here when the session opened without a fresh start.
     const branchName = shortBranch(((await read($, branch)) ?? (await currentBranch($))).name)
-    if (parts.length === 0 && branchName === null) {
-      return next(e)
-    }
+    // Tags after the figures, never given up: the branch, and how many background tasks run.
+    const running = new Set([...(await read($, background)), ...((await read($, agents)) ?? (await liveAgents($)))])
+    const tags = [...(branchName === null ? [] : [branchName]), `bg (${running.size})`]
 
     // One row, side by side: the band is wide and short; a faint divider stands between items
     // so they read as separate figures.
     if (e.surface === 'desktop') {
       const { Box, Text, Svg } = $.ui.resolve(e)
       // The row never wraps: as the window narrows the band picks the fullest form in FITS that fits.
-      const fit = fitFor(parts, branchName, e.props.bodyColumns)
+      const fit = fitFor(parts, tags, e.props.bodyColumns)
       return (
         <Box flexDirection="row" alignItems="center" flexWrap="nowrap" columnGap="xs" overflow="hidden">
           {parts.flatMap((part, index) => [
@@ -362,12 +450,13 @@ export const register: Register = on => {
               <Text size="body" dimColor>{part.text}{fit.showsUse ? USE : ''}{part.detailRank > fit.detailsDropped ? part.detail : ''}</Text>
             </Box>,
           ])}
-          {branchName !== null ? (
-            <Box key="branch" flexDirection="row" alignItems="center" columnGap="xs">
-              {parts.length === 0 ? null : <Text size="body" dimColor>│</Text>}
-              <Text size="body" dimColor>{branchName}</Text>
+          {/* Each tag wraps with its divider, so no divider is left at a row's end. */}
+          {tags.map((tag, index) => (
+            <Box key={`tag-${index}`} flexDirection="row" alignItems="center" columnGap="xs">
+              {parts.length === 0 && index === 0 ? null : <Text size="body" dimColor>│</Text>}
+              <Text size="body" dimColor>{tag}</Text>
             </Box>
-          ) : null}
+          ))}
         </Box>
       )
     }
@@ -386,10 +475,10 @@ export const register: Register = on => {
             </Text>,
           ]
         })}
-        {branchName !== null ? [
-          ...(parts.length === 0 ? [] : [<Text key="divider-branch" dimColor>│</Text>]),
-          <Text key="branch" dimColor>{branchName}</Text>,
-        ] : null}
+        {tags.flatMap((tag, index) => [
+          ...(parts.length === 0 && index === 0 ? [] : [<Text key={`divider-tag-${index}`} dimColor>│</Text>]),
+          <Text key={`tag-${index}`} dimColor>{tag}</Text>,
+        ])}
       </Box>
     )
   })

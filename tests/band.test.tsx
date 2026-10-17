@@ -141,12 +141,13 @@ test('shows no branch outside git', async ($, on) => {
   on('session.repo', () => ({ value: null }))
   await $.session.measure({ context: { tokens: 20000, window: 200000, percent: 10 }, rateLimits: [], changed: ['context'] })
   const ui = await $.ui.mount({ plugin: 'context-band', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
-  // The context fill alone: no divider, since no branch follows it.
-  expect(await ui.find({ type: 'Text', text: '│' })).toBeUndefined()
+  // The background count alone follows the context fill.
+  expect(await ui.find({ type: 'Text', text: 'bg (0)' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'main' })).toBeUndefined()
   await ui.unmount()
 })
 
-test('a narrow desktop band gives up one thing at a time, down to the percents and the branch', async ($, on) => {
+test('a narrow desktop band gives up one thing at a time, down to the percents and the tags', async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on)
   on('session.measure', (_$, e) => ({ changed: e.changed }))
@@ -169,40 +170,87 @@ test('a narrow desktop band gives up one thing at a time, down to the percents a
   await wide.unmount()
 
   // One step in: the context's token counts go first, the rest stays.
-  const middle = await mount(120)
+  const middle = await mount(130)
   expect(await middle.find({ type: 'Text', text: /^22% 사용$/ })).toBeDefined()
   expect(await middle.find({ type: 'Text', text: /^9% 사용 \(2시간 37분 후 재설정\)$/ })).toBeDefined()
   expect(await middle.find({ type: 'Text', text: /^42% 사용 \(금요일 03:00 재설정\)$/ })).toBeDefined()
   await middle.unmount()
 
   // Tighter: the weekly reset goes next; the session's countdown, needed soonest, stays, bars whole.
-  const tighter = await mount(100)
+  const tighter = await mount(110)
   expect(await tighter.find({ type: 'Text', text: /^42% 사용$/ })).toBeDefined()
   expect(await tighter.find({ type: 'Text', text: /^9% 사용 \(2시간 37분 후 재설정\)$/ })).toBeDefined()
-  expect(await tighter.find({ type: 'Svg', props: { width: 48 } })).toBeDefined()
+  expect(await tighter.find({ type: 'Svg', props: { width: 37 } })).toBeDefined()
   expect(await tighter.find({ type: 'Text', text: 'main' })).toBeDefined()
   await tighter.unmount()
 
   // Tighter still: the word 사용 goes before the countdown, the bars or the branch do.
-  const terse = await mount(85)
+  const terse = await mount(95)
   expect(await terse.find({ type: 'Text', text: /^42%$/ })).toBeDefined()
   expect(await terse.find({ type: 'Text', text: /^9% \(2시간 37분 후 재설정\)$/ })).toBeDefined()
-  expect(await terse.find({ type: 'Svg', props: { width: 48 } })).toBeDefined()
+  expect(await terse.find({ type: 'Svg', props: { width: 37 } })).toBeDefined()
   expect(await terse.find({ type: 'Text', text: 'main' })).toBeDefined()
   await terse.unmount()
 
   // Narrow: the bars are gone before the names.
-  const narrow = await mount(40)
+  const narrow = await mount(55)
   expect(await narrow.find({ type: 'Text', text: '세션' })).toBeDefined()
   expect(await narrow.find({ type: 'Svg' })).toBeUndefined()
   expect(await narrow.find({ type: 'Text', text: 'main' })).toBeDefined()
   await narrow.unmount()
 
-  // The least a band shows: "22% │ 9% │ 42% │ main".
+  // The least a band shows: "22% │ 9% │ 42% │ main │ bg (0)".
   const least = await mount(30)
   expect(await least.find({ type: 'Text', text: '세션' })).toBeUndefined()
-  for (const percent of ['22%', '9%', '42%', 'main']) {
+  for (const percent of ['22%', '9%', '42%', 'main', 'bg (0)']) {
     expect(await least.find({ type: 'Text', text: percent })).toBeDefined()
   }
   await least.unmount()
+})
+
+test('counts background tasks in as they start and out as their notifications end them', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on)
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  on('session.repo', () => ({ value: null }))
+  on('tool.call', (_$, e: any) => ({ result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: e.description } }))
+  await $.session.measure({ context: { tokens: 20000, window: 200000, percent: 10 }, rateLimits: [], changed: ['context'] })
+  const band = async (surface: 'terminal' | 'desktop', expected: string) => {
+    const ui = await $.ui.mount({ plugin: 'context-band', surface, component: 'AbovePrompt', props: BAND_PROPS })
+    expect(await ui.find({ type: 'Text', text: expected })).toBeDefined()
+    await ui.unmount()
+  }
+
+  await band('desktop', 'bg (0)')
+  for (const id of ['b1', 'b2']) {
+    await $.tool.call({ tool: 'Bash', command: 'sleep 60', description: id, run_in_background: true } as any)
+  }
+  await band('desktop', 'bg (2)')
+  await band('terminal', 'bg (2)')
+
+  const notify = (text: string) => $.session.append({
+    message: { type: 'user', role: 'user', content: text },
+    door: 'notification',
+    origin: { kind: 'task-notification' },
+    uuid: `row-${text.length}`,
+  } as any)
+  // A monitor's event, no ending status: still running.
+  await notify('<task-notification>\n<task-id>b2</task-id>\n<event>line</event>\n</task-notification>')
+  await notify('<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>')
+  await band('desktop', 'bg (1)')
+})
+
+test('counts the main loop agents already at work, from the session record', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on)
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  on('session.repo', () => ({ value: null }))
+  const agent = (id: string, status: string, parentId?: string) =>
+    ({ id, description: id, type: 'general-purpose', status, ...(parentId === undefined ? {} : { parentId }) })
+  on('agent.list', () => ({ value: [agent('a1', 'running'), agent('a2', 'completed'), agent('a3', 'running', 'a1')] }))
+  await $.session.measure({ context: { tokens: 20000, window: 200000, percent: 10 }, rateLimits: [], changed: ['context'] })
+  const ui = await $.ui.mount({ plugin: 'context-band', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
+  // a1 only: a2 has ended, and a3 is a1's own, listed under it.
+  expect(await ui.find({ type: 'Text', text: 'bg (1)' })).toBeDefined()
+  await ui.unmount()
 })

@@ -7,6 +7,6 @@ export type BranchReading = { name: string | null }
 
 declare module 'claude-code' {
   interface PluginState {
-    'context-band': { fill: ContextFill | null; alerted: number; limits: LimitsReading | null; minute: number; branch: BranchReading | null }
+    'context-band': { fill: ContextFill | null; alerted: number; limits: LimitsReading | null; minute: number; branch: BranchReading | null; background: string[]; agents: string[] | null }
   }
 }
