@@ -1,15 +1,15 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ContextFill, LimitsReading, RateLimit } from '../types'
+import type { BranchReading, ContextFill, LimitsReading, RateLimit } from '../types'
 
 const fill = atom({ plugin: 'context-band', key: 'fill' } as const, null as ContextFill | null)
 const alerted = atom({ plugin: 'context-band', key: 'alerted' } as const, 0)
 const limits = atom({ plugin: 'context-band', key: 'limits' } as const, null as LimitsReading | null)
 // Bumped every minute so the reset countdowns redraw.
 const minute = atom({ plugin: 'context-band', key: 'minute' } as const, 0)
-// Whether the session runs in a git worktree; null until checked.
-const worktree = atom({ plugin: 'context-band', key: 'worktree' } as const, null as boolean | null)
+// The branch checked out where the session runs; null until checked.
+const branch = atom({ plugin: 'context-band', key: 'branch' } as const, null as BranchReading | null)
 
 // The limits are the account's, not the session's: the last reading any session got is kept
 // across sessions, so a session that has had no response yet still shows them.
@@ -19,6 +19,7 @@ const THRESHOLDS = [90, 75]
 const BAR_CELLS = 10
 const BAR_WIDTH = 56
 const BAR_HEIGHT = 6
+const BRANCH_MAX = 24
 const FILL_COLORS = { normal: '#8b8f98', warning: '#d9922e', error: '#d9534f' }
 const LIMIT_LABELS: Record<string, string> = { five_hour: '세션', seven_day: '주간', spend_limit: '지출' }
 const LIMIT_ORDER = ['five_hour', 'seven_day', 'spend_limit']
@@ -130,21 +131,65 @@ async function estimate($: EngineInterface): Promise<ContextFill | null> {
   return null
 }
 
-// A worktree's repository root is the main working tree's, and its own `.git` is a file, not a folder.
-async function inWorktree($: EngineInterface): Promise<boolean> {
+// The checkout's git directory: `.git` itself, or in a worktree the folder its `.git` file points to.
+async function gitDir($: EngineInterface, dir: string): Promise<string | null> {
+  const dotGit = `${dir}/.git`
+  const { kind } = await $.fs.stat(dotGit)
+  if (kind === 'dir') {
+    return dotGit
+  }
+  const pointed = /^gitdir:\s*(.+?)\s*$/m.exec(await $.fs.read(dotGit))?.[1]
+  if (pointed === undefined) {
+    return null
+  }
+  return /^([A-Za-z]:)?[\\/]/.test(pointed) ? pointed : `${dir}/${pointed}`
+}
+
+// The branch checked out in the session's own working copy: read from its HEAD, found by walking
+// up from the session's directory. A detached HEAD reads as its short commit, a worktree as `worktree`.
+async function currentBranch($: EngineInterface): Promise<BranchReading> {
   try {
-    const repo = await $.session.repo()
-    if (repo === null) {
-      return false
+    if ((await $.session.repo()) === null) {
+      return { name: null }
     }
-    const root = await $.session.root()
-    const norm = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-    if (norm(repo.root) === norm(root)) {
-      return false
+    let dir = (await $.session.root()).replace(/\\/g, '/').replace(/\/+$/, '')
+    for (let depth = 0; depth < 64; depth++) {
+      const git = await gitDir($, dir).catch(() => undefined)
+      if (git !== undefined) {
+        if (git === null) {
+          return { name: null }
+        }
+        // A worktree's branch names are long and its own anyway: the band says only that it is one.
+        if (/\/worktrees\/[^/]+\/?$/.test(git.replace(/\\/g, '/'))) {
+          return { name: 'worktree' }
+        }
+        const head = (await $.fs.read(`${git}/HEAD`)).trim()
+        const ref = /^ref:\s*refs\/heads\/(.+)$/.exec(head)?.[1]
+        return { name: ref ?? (/^[0-9a-f]{7,}$/i.test(head) ? head.slice(0, 7) : null) }
+      }
+      const parent = dir.replace(/\/[^/]*$/, '')
+      if (parent === dir || parent === '') {
+        break
+      }
+      dir = parent
     }
-    return (await $.fs.stat(`${root}/.git`)).kind === 'file'
   } catch {
-    return false
+    // Unreadable: no branch shown.
+  }
+  return { name: null }
+}
+
+// A long name would wrap the band onto a second row: cut it, ending in an ellipsis.
+function shortBranch(name: string | null): string | null {
+  const chars = name === null ? [] : [...name]
+  return chars.length > BRANCH_MAX ? `${chars.slice(0, BRANCH_MAX - 1).join('')}…` : name
+}
+
+async function takeBranch($: EngineInterface): Promise<void> {
+  const reading = await currentBranch($)
+  const current = await read($, branch)
+  if (current?.name !== reading.name) {
+    await update($, branch, () => reading)
   }
 }
 
@@ -162,11 +207,12 @@ export const register: Register = on => {
       // No reading yet: the stored one stands until the first response.
     }
     await takeLimits($, live)
-    const isWorktree = await inWorktree($)
-    await update($, worktree, () => isWorktree)
-    // Each minute: redraw the countdowns, and take a newer reading another session stored.
+    await takeBranch($)
+    // Each minute: redraw the countdowns, take a newer reading another session stored,
+    // and catch a branch switched outside the session.
     $.clock.every(60_000, () => {
       void takeLimits($).then(() => update($, minute, n => n + 1))
+      void takeBranch($)
     })
     return result
   })
@@ -193,6 +239,13 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // A command the model runs may switch the branch: read it again once the command is done.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const result = await next(e)
+    await takeBranch($)
+    return result
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) {
       return next(e)
@@ -211,8 +264,8 @@ export const register: Register = on => {
     }
     parts.push(...limitParts(reading?.list ?? [], await $.clock.now()))
     // Checked here when the session opened without a fresh start.
-    const isWorktree = (await read($, worktree)) ?? (await inWorktree($))
-    if (parts.length === 0 && !isWorktree) {
+    const branchName = shortBranch(((await read($, branch)) ?? (await currentBranch($))).name)
+    if (parts.length === 0 && branchName === null) {
       return next(e)
     }
 
@@ -231,11 +284,11 @@ export const register: Register = on => {
               <Text size="body" dimColor>{part.text}</Text>
             </Box>,
           ])}
-          {/* The divider and the tag wrap together, so no divider is left at a row's end. */}
-          {isWorktree ? (
-            <Box key="worktree" flexDirection="row" alignItems="center" columnGap="xs">
+          {/* The divider and the branch wrap together, so no divider is left at a row's end. */}
+          {branchName !== null ? (
+            <Box key="branch" flexDirection="row" alignItems="center" columnGap="xs">
               {parts.length === 0 ? null : <Text size="body" dimColor>│</Text>}
-              <Text size="body" dimColor>워크트리</Text>
+              <Text size="body" dimColor>{branchName}</Text>
             </Box>
           ) : null}
         </Box>
@@ -256,9 +309,9 @@ export const register: Register = on => {
             </Text>,
           ]
         })}
-        {isWorktree ? [
-          ...(parts.length === 0 ? [] : [<Text key="divider-worktree" dimColor>│</Text>]),
-          <Text key="worktree" dimColor>워크트리</Text>,
+        {branchName !== null ? [
+          ...(parts.length === 0 ? [] : [<Text key="divider-branch" dimColor>│</Text>]),
+          <Text key="branch" dimColor>{branchName}</Text>,
         ] : null}
       </Box>
     )

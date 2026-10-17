@@ -64,29 +64,84 @@ test('a session with no reading of its own shows the last one another session st
   await ui.unmount()
 })
 
-test('ends the band with 워크트리 when the session runs in a git worktree', async ($, on) => {
+const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 9 } } as any
+
+// A working copy laid out as `files` says: a path names a folder (`dir`) or a file's text.
+function mockCheckout(on: any, root: string, files: Record<string, string>) {
+  on('session.repo', () => ({ value: { root: 'C:/repo', remote: null, internal: false, name: null } }))
+  on('session.root', () => ({ value: root }))
+  // The engine hands paths on with backslashes; a missing one falls to the kit's bottom hook, which throws.
+  const at = (path: string) => files[path.replace(/\\/g, '/')]
+  on('fs.stat', (_$: unknown, e: { path: string }, next: (e: unknown) => unknown) => {
+    const entry = at(e.path)
+    if (entry === undefined) return next(e)
+    return { value: { kind: entry === 'dir' ? 'dir' : 'file', size: entry.length, mtimeMs: 0, isLink: false } }
+  })
+  on('fs.read', (_$: unknown, e: { path: string }, next: (e: unknown) => unknown) => {
+    const entry = at(e.path)
+    if (entry === undefined || entry === 'dir') return next(e)
+    return { value: entry }
+  })
+}
+
+test('ends the band with worktree, not its branch, in a worktree session', async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on)
   on('session.measure', (_$, e) => ({ changed: e.changed }))
-  on('session.repo', () => ({ value: { root: 'C:\repo', remote: null, internal: false, name: null } }))
-  on('session.root', () => ({ value: 'C:\repo\.claude\worktrees\abc' }))
-  on('fs.stat', () => ({ value: { kind: 'file', size: 40, mtimeMs: 0, isLink: false } }))
+  mockCheckout(on, String.raw`C:\repo\.claude\worktrees\abc`, {
+    'C:/repo/.claude/worktrees/abc/.git': 'gitdir: C:/repo/.git/worktrees/abc\n',
+    'C:/repo/.git/worktrees/abc/HEAD': 'ref: refs/heads/claude/fix-band\n',
+  })
   await $.session.measure({ context: { tokens: 20000, window: 200000, percent: 10 }, rateLimits: [], changed: ['context'] })
   for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'context-band', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 9 } } as any })
-    expect(await ui.find({ type: 'Text', text: '워크트리' })).toBeDefined()
+    const ui = await $.ui.mount({ plugin: 'context-band', surface, component: 'AbovePrompt', props: BAND_PROPS })
+    expect(await ui.find({ type: 'Text', text: 'worktree' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /fix-band/ })).toBeUndefined()
     await ui.unmount()
   }
 })
 
-test('shows no worktree tag in the main checkout', async ($, on) => {
+test('finds the branch from a folder inside the main checkout', async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on)
   on('session.measure', (_$, e) => ({ changed: e.changed }))
-  on('session.repo', () => ({ value: { root: 'C:\repo', remote: null, internal: false, name: null } }))
-  on('session.root', () => ({ value: 'C:/repo/' }))
+  mockCheckout(on, 'C:/repo/sub/', { 'C:/repo/.git': 'dir', 'C:/repo/.git/HEAD': 'ref: refs/heads/main\n' })
   await $.session.measure({ context: { tokens: 20000, window: 200000, percent: 10 }, rateLimits: [], changed: ['context'] })
-  const ui = await $.ui.mount({ plugin: 'context-band', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 9 } } as any })
-  expect(await ui.find({ type: 'Text', text: '워크트리' })).toBeUndefined()
+  const ui = await $.ui.mount({ plugin: 'context-band', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
+  expect(await ui.find({ type: 'Text', text: 'main' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('cuts a long branch name with an ellipsis so the band stays one row', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on)
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  mockCheckout(on, 'C:/repo', { 'C:/repo/.git': 'dir', 'C:/repo/.git/HEAD': 'ref: refs/heads/feature/deep-seawater-public-acceptance\n' })
+  await $.session.measure({ context: { tokens: 20000, window: 200000, percent: 10 }, rateLimits: [], changed: ['context'] })
+  const ui = await $.ui.mount({ plugin: 'context-band', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
+  expect(await ui.find({ type: 'Text', text: 'feature/deep-seawater-p…' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('shows a detached HEAD as its short commit', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on)
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  mockCheckout(on, 'C:/repo', { 'C:/repo/.git': 'dir', 'C:/repo/.git/HEAD': '6209fb2a1c0d9e8f7b6a5c4d3e2f1a0b9c8d7e6f\n' })
+  await $.session.measure({ context: { tokens: 20000, window: 200000, percent: 10 }, rateLimits: [], changed: ['context'] })
+  const ui = await $.ui.mount({ plugin: 'context-band', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+  expect(await ui.find({ type: 'Text', text: '6209fb2' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('shows no branch outside git', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on)
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  on('session.repo', () => ({ value: null }))
+  await $.session.measure({ context: { tokens: 20000, window: 200000, percent: 10 }, rateLimits: [], changed: ['context'] })
+  const ui = await $.ui.mount({ plugin: 'context-band', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS })
+  // The context fill alone: no divider, since no branch follows it.
+  expect(await ui.find({ type: 'Text', text: '│' })).toBeUndefined()
   await ui.unmount()
 })
