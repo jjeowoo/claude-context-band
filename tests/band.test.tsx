@@ -8,7 +8,7 @@ test('shows context fill in the band above the prompt on terminal and desktop', 
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   await $.session.measure({ context: { tokens: 84000, window: 200000, percent: 42 }, rateLimits: [], changed: ['context'] })
   for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'context-band', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 9 } } as any })
+    const ui = await $.ui.mount({ plugin: 'context-band', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 9 } } as any })
     expect(await ui.find({ type: 'Text', text: /42% 사용 \(84k \/ 200k\)/ })).toBeDefined()
     await ui.unmount()
   }
@@ -41,7 +41,7 @@ test('adds the session and weekly limits with their reset countdowns', async ($,
     changed: ['context', 'rateLimits'],
   })
   for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'context-band', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 9 } } as any })
+    const ui = await $.ui.mount({ plugin: 'context-band', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 9 } } as any })
     expect(await ui.find({ type: 'Text', text: /29% 사용 \(294k \/ 1000k\)/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /5% 사용 \(4시간 23분 후 재설정\)/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /22% 사용 \(금요일 03:00 재설정\)/ })).toBeDefined()
@@ -57,14 +57,14 @@ test('a session with no reading of its own shows the last one another session st
   ] } })
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   await $.session.measure({ context: { tokens: 20000, window: 200000, percent: 10 }, rateLimits: [], changed: ['context'] })
-  const ui = await $.ui.mount({ plugin: 'context-band', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 9 } } as any })
+  const ui = await $.ui.mount({ plugin: 'context-band', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 9 } } as any })
   expect(await ui.find({ type: 'Text', text: /41% 사용 \(1시간 30분 후 재설정\)/ })).toBeDefined()
   // The weekly window reset after that reading, so its stale figure is not shown.
   expect(await ui.find({ type: 'Text', text: /12% 사용/ })).toBeUndefined()
   await ui.unmount()
 })
 
-const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 9 } } as any
+const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 9 } } as any
 
 // A working copy laid out as `files` says: a path names a folder (`dir`) or a file's text.
 function mockCheckout(on: any, root: string, files: Record<string, string>) {
@@ -144,4 +144,65 @@ test('shows no branch outside git', async ($, on) => {
   // The context fill alone: no divider, since no branch follows it.
   expect(await ui.find({ type: 'Text', text: '│' })).toBeUndefined()
   await ui.unmount()
+})
+
+test('a narrow desktop band gives up one thing at a time, down to the percents and the branch', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on)
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  mockCheckout(on, 'C:/repo', { 'C:/repo/.git': 'dir', 'C:/repo/.git/HEAD': 'ref: refs/heads/main\n' })
+  await $.session.measure({
+    context: { tokens: 221000, window: 1000000, percent: 22 },
+    rateLimits: [
+      { kind: 'five_hour', percentUsed: 9, resetsAt: new Date(NOW + (2 * 60 + 37) * 60000 + 30000).toISOString() },
+      { kind: 'seven_day', percentUsed: 42, resetsAt: new Date(2026, 9, 23, 3, 0).toISOString() },
+    ],
+    changed: ['context', 'rateLimits'],
+  })
+  const mount = (bodyColumns: number) =>
+    $.ui.mount({ plugin: 'context-band', surface: 'desktop', component: 'AbovePrompt', props: { ...BAND_PROPS, bodyColumns } })
+
+  const wide = await mount(200)
+  expect(await wide.find({ type: 'Text', text: /^22% 사용 \(221k \/ 1000k\)$/ })).toBeDefined()
+  expect(await wide.find({ type: 'Text', text: /^9% 사용 \(2시간 37분 후 재설정\)$/ })).toBeDefined()
+  expect(await wide.find({ type: 'Text', text: 'main' })).toBeDefined()
+  await wide.unmount()
+
+  // One step in: the context's token counts go first, the rest stays.
+  const middle = await mount(120)
+  expect(await middle.find({ type: 'Text', text: /^22% 사용$/ })).toBeDefined()
+  expect(await middle.find({ type: 'Text', text: /^9% 사용 \(2시간 37분 후 재설정\)$/ })).toBeDefined()
+  expect(await middle.find({ type: 'Text', text: /^42% 사용 \(금요일 03:00 재설정\)$/ })).toBeDefined()
+  await middle.unmount()
+
+  // Tighter: the weekly reset goes next; the session's countdown, needed soonest, stays, bars whole.
+  const tighter = await mount(100)
+  expect(await tighter.find({ type: 'Text', text: /^42% 사용$/ })).toBeDefined()
+  expect(await tighter.find({ type: 'Text', text: /^9% 사용 \(2시간 37분 후 재설정\)$/ })).toBeDefined()
+  expect(await tighter.find({ type: 'Svg', props: { width: 48 } })).toBeDefined()
+  expect(await tighter.find({ type: 'Text', text: 'main' })).toBeDefined()
+  await tighter.unmount()
+
+  // Tighter still: the word 사용 goes before the countdown, the bars or the branch do.
+  const terse = await mount(85)
+  expect(await terse.find({ type: 'Text', text: /^42%$/ })).toBeDefined()
+  expect(await terse.find({ type: 'Text', text: /^9% \(2시간 37분 후 재설정\)$/ })).toBeDefined()
+  expect(await terse.find({ type: 'Svg', props: { width: 48 } })).toBeDefined()
+  expect(await terse.find({ type: 'Text', text: 'main' })).toBeDefined()
+  await terse.unmount()
+
+  // Narrow: the bars are gone before the names.
+  const narrow = await mount(40)
+  expect(await narrow.find({ type: 'Text', text: '세션' })).toBeDefined()
+  expect(await narrow.find({ type: 'Svg' })).toBeUndefined()
+  expect(await narrow.find({ type: 'Text', text: 'main' })).toBeDefined()
+  await narrow.unmount()
+
+  // The least a band shows: "22% │ 9% │ 42% │ main".
+  const least = await mount(30)
+  expect(await least.find({ type: 'Text', text: '세션' })).toBeUndefined()
+  for (const percent of ['22%', '9%', '42%', 'main']) {
+    expect(await least.find({ type: 'Text', text: percent })).toBeDefined()
+  }
+  await least.unmount()
 })

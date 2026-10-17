@@ -17,25 +17,92 @@ const STORE_KEY = 'limits'
 
 const THRESHOLDS = [90, 75]
 const BAR_CELLS = 10
-const BAR_WIDTH = 56
+const BAR_WIDTH = 48
+// The shorter bar a desktop band takes once every detail is gone and it still does not fit.
+const BAR_NARROW_WIDTH = 32
 const BAR_HEIGHT = 6
+// Desktop widths in CSS pixels, measured on the app: a `bodyColumns` cell, a text cell
+// (cellsOf counts a Hangul character as two), the sm gap inside an item, and a divider with its xs gaps.
+const COLUMN_PX = 7
+const TEXT_CELL_PX = 6.4
+const GAP_PX = 8
+const DIVIDER_PX = 16
+const SPARE_PX = 16
 const BRANCH_MAX = 24
 const FILL_COLORS = { normal: '#8b8f98', warning: '#d9922e', error: '#d9534f' }
 const LIMIT_LABELS: Record<string, string> = { five_hour: '세션', seven_day: '주간', spend_limit: '지출' }
 const LIMIT_ORDER = ['five_hour', 'seven_day', 'spend_limit']
 
 type Level = keyof typeof FILL_COLORS
-type Part = { name: string; percent: number; text: string }
+// `detail` is the parenthesized rest, the first thing a narrow band gives up, one item at a time in
+// `detailRank` order: the context's token counts (1, the percent already says it), the weekly reset
+// (2, days off), then the session's countdown (3, the one that matters soonest).
+type Part = { name: string; percent: number; text: string; detail: string; detailRank: number }
+const DETAIL_RANKS: Record<string, number> = { seven_day: 2, five_hour: 3 }
+// Said after each percent while there is room; a word the percent can do without.
+const USE = ' 사용'
+// What a desktop band shows at a given width, from the whole of it to the least, each step giving
+// up one thing more: the token counts, the weekly reset, the word 사용, the session's countdown,
+// shorter bars, the bars, and the item names. The percents and the branch always stay:
+// "14% │ 6% │ 12% │ main" is the least a band shows.
+// `detailsDropped`: the details of that rank and below are left out.
+type Fit = { barWidth: number; detailsDropped: number; showsUse: boolean; showsNames: boolean }
+const FITS: Fit[] = [
+  { barWidth: BAR_WIDTH, detailsDropped: 0, showsUse: true, showsNames: true },
+  { barWidth: BAR_WIDTH, detailsDropped: 1, showsUse: true, showsNames: true },
+  { barWidth: BAR_WIDTH, detailsDropped: 2, showsUse: true, showsNames: true },
+  { barWidth: BAR_WIDTH, detailsDropped: 2, showsUse: false, showsNames: true },
+  { barWidth: BAR_WIDTH, detailsDropped: 9, showsUse: false, showsNames: true },
+  { barWidth: BAR_NARROW_WIDTH, detailsDropped: 9, showsUse: false, showsNames: true },
+  { barWidth: 0, detailsDropped: 9, showsUse: false, showsNames: true },
+  { barWidth: 0, detailsDropped: 9, showsUse: false, showsNames: false },
+]
 
 function levelOf(percent: number): Level {
   return percent >= 90 ? 'error' : percent >= 75 ? 'warning' : 'normal'
 }
 
-function barSvg(percent: number, level: Level): string {
+function barSvg(percent: number, level: Level, width: number): string {
   const r = BAR_HEIGHT / 2
-  const w = Math.max(0, Math.min(BAR_WIDTH, (percent / 100) * BAR_WIDTH))
+  const w = Math.max(0, Math.min(width, (percent / 100) * width))
   const fillRect = w === 0 ? '' : `<rect width="${Math.max(w, BAR_HEIGHT).toFixed(1)}" height="${BAR_HEIGHT}" rx="${r}" fill="${FILL_COLORS[level]}"/>`
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${BAR_WIDTH}" height="${BAR_HEIGHT}" viewBox="0 0 ${BAR_WIDTH} ${BAR_HEIGHT}"><rect width="${BAR_WIDTH}" height="${BAR_HEIGHT}" rx="${r}" fill="#8b8f98" fill-opacity="0.25"/>${fillRect}</svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${BAR_HEIGHT}" viewBox="0 0 ${width} ${BAR_HEIGHT}"><rect width="${width}" height="${BAR_HEIGHT}" rx="${r}" fill="#8b8f98" fill-opacity="0.25"/>${fillRect}</svg>`
+}
+
+// Hangul Jamo, CJK, Hangul syllables, compatibility ideographs, fullwidth forms.
+const WIDE_RANGES: [number, number][] = [[0x1100, 0x115f], [0x2e80, 0xa4cf], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xff00, 0xff60], [0xffe0, 0xffe6]]
+
+// Cells a text takes: two for a Hangul or other wide character, one for the rest.
+function cellsOf(text: string): number {
+  let cells = 0
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0
+    const isWide = WIDE_RANGES.some(([from, to]) => cp >= from && cp <= to)
+    cells += isWide ? 2 : 1
+  }
+  return cells
+}
+
+// The fullest band that fits `columns`, its width in pixels estimated from the texts and bars it
+// would draw; the least of them when none does.
+function fitFor(parts: Part[], branchName: string | null, columns: number): Fit {
+  for (const fit of FITS) {
+    let px = SPARE_PX
+    parts.forEach((part, index) => {
+      const detail = part.detailRank > fit.detailsDropped ? part.detail : ''
+      const text = part.text + (fit.showsUse ? USE : '') + detail
+      px += (index === 0 ? 0 : DIVIDER_PX) + cellsOf(text) * TEXT_CELL_PX
+      px += fit.showsNames ? cellsOf(part.name) * TEXT_CELL_PX + GAP_PX : 0
+      px += fit.barWidth === 0 ? 0 : fit.barWidth + GAP_PX
+    })
+    if (branchName !== null) {
+      px += (parts.length === 0 ? 0 : DIVIDER_PX) + cellsOf(branchName) * TEXT_CELL_PX
+    }
+    if (px <= columns * COLUMN_PX) {
+      return fit
+    }
+  }
+  return FITS[FITS.length - 1]
 }
 
 function formatTokens(n: number): string {
@@ -70,7 +137,9 @@ function limitParts(list: RateLimit[], now: number): Part[] {
     parts.push({
       name: LIMIT_LABELS[l.kind] ?? l.kind,
       percent: l.percentUsed,
-      text: `${Math.round(l.percentUsed)}% 사용` + (Number.isNaN(at) ? '' : l.kind === 'seven_day' ? resetAtText(at) : untilText(at, now)),
+      text: `${Math.round(l.percentUsed)}%`,
+      detail: Number.isNaN(at) ? '' : l.kind === 'seven_day' ? resetAtText(at) : untilText(at, now),
+      detailRank: DETAIL_RANKS[l.kind] ?? 4,
     })
   }
   return parts
@@ -259,8 +328,13 @@ export const register: Register = on => {
 
     const parts: Part[] = []
     if (current !== null && current.percent !== undefined) {
-      const label = `${current.percent}% 사용` + (current.tokens === undefined ? '' : ` (${formatTokens(current.tokens)} / ${formatTokens(current.window)})`)
-      parts.push({ name: '컨텍스트', percent: current.percent, text: label })
+      parts.push({
+        name: '컨텍스트',
+        percent: current.percent,
+        text: `${current.percent}%`,
+        detail: current.tokens === undefined ? '' : ` (${formatTokens(current.tokens)} / ${formatTokens(current.window)})`,
+        detailRank: 1,
+      })
     }
     parts.push(...limitParts(reading?.list ?? [], await $.clock.now()))
     // Checked here when the session opened without a fresh start.
@@ -273,18 +347,21 @@ export const register: Register = on => {
     // so they read as separate figures.
     if (e.surface === 'desktop') {
       const { Box, Text, Svg } = $.ui.resolve(e)
+      // The row never wraps: as the window narrows the band picks the fullest form in FITS that fits.
+      const fit = fitFor(parts, branchName, e.props.bodyColumns)
       return (
-        <Box flexDirection="row" alignItems="center" flexWrap="wrap" columnGap="xs">
+        <Box flexDirection="row" alignItems="center" flexWrap="nowrap" columnGap="xs" overflow="hidden">
           {parts.flatMap((part, index) => [
             ...(index === 0 ? [] : [<Text key={`divider-${part.name}`} size="body" dimColor>│</Text>]),
             // A small inset before 컨텍스트 alone, off the band's left edge.
             <Box key={part.name} flexDirection="row" alignItems="center" gap="sm" {...(index === 0 ? { marginLeft: 0.25 } : {})}>
-              <Text size="body" dimColor>{part.name}</Text>
-              <Svg source={barSvg(part.percent, levelOf(part.percent))} alt={`${part.name} ${part.text}`} width={BAR_WIDTH} height={BAR_HEIGHT} />
-              <Text size="body" dimColor>{part.text}</Text>
+              {fit.showsNames ? <Text size="body" dimColor>{part.name}</Text> : null}
+              {fit.barWidth === 0 ? null : (
+                <Svg source={barSvg(part.percent, levelOf(part.percent), fit.barWidth)} alt={`${part.name} ${part.text}${USE}${part.detail}`} width={fit.barWidth} height={BAR_HEIGHT} />
+              )}
+              <Text size="body" dimColor>{part.text}{fit.showsUse ? USE : ''}{part.detailRank > fit.detailsDropped ? part.detail : ''}</Text>
             </Box>,
           ])}
-          {/* The divider and the branch wrap together, so no divider is left at a row's end. */}
           {branchName !== null ? (
             <Box key="branch" flexDirection="row" alignItems="center" columnGap="xs">
               {parts.length === 0 ? null : <Text size="body" dimColor>│</Text>}
@@ -305,7 +382,7 @@ export const register: Register = on => {
           return [
             ...(index === 0 ? [] : [<Text key={`divider-${part.name}`} dimColor>│</Text>]),
             <Text key={part.name}>
-              <Text dimColor>{part.name}</Text> <Text color={level === 'normal' ? 'subtle' : level}>{bar}</Text> <Text dimColor>{part.text}</Text>
+              <Text dimColor>{part.name}</Text> <Text color={level === 'normal' ? 'subtle' : level}>{bar}</Text> <Text dimColor>{part.text}{USE}{part.detail}</Text>
             </Text>,
           ]
         })}
