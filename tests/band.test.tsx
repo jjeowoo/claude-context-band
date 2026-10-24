@@ -208,6 +208,40 @@ test('a narrow desktop band gives up one thing at a time, down to the percents a
   await least.unmount()
 })
 
+test('VS Code draws the desktop band: rounded bars on one row, narrowing the same way', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on)
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  mockCheckout(on, 'C:/repo', { 'C:/repo/.git': 'dir', 'C:/repo/.git/HEAD': 'ref: refs/heads/main\n' })
+  await $.session.measure({
+    context: { tokens: 38000, window: 1000000, percent: 4 },
+    rateLimits: [{ kind: 'seven_day', percentUsed: 27, resetsAt: new Date(2026, 9, 23, 3, 0).toISOString() }],
+    changed: ['context', 'rateLimits'],
+  })
+  const mount = (bodyColumns: number) =>
+    $.ui.mount({ plugin: 'context-band', surface: 'vscode', component: 'AbovePrompt', props: { ...BAND_PROPS, bodyColumns } })
+
+  const wide = await mount(200)
+  expect(await wide.find({ type: 'Svg', props: { width: 37 } })).toBeDefined()
+  expect(await wide.find({ type: 'Box', props: { flexWrap: 'nowrap' } })).toBeDefined()
+  expect(await wide.find({ type: 'Text', text: /^4% 사용 \(38k \/ 1000k\)$/ })).toBeDefined()
+  await wide.unmount()
+
+  // 39 columns is what a ~540px panel reports: one of its columns is a full-width `─`, so the band
+  // keeps its names, bars and 사용 there, giving up only the details.
+  const panel = await mount(39)
+  expect(await panel.find({ type: 'Text', text: '컨텍스트' })).toBeDefined()
+  expect(await panel.find({ type: 'Svg', props: { width: 37 } })).toBeDefined()
+  expect(await panel.find({ type: 'Text', text: /^4% 사용$/ })).toBeDefined()
+  expect(await panel.find({ type: 'Text', text: /^27% 사용$/ })).toBeDefined()
+  await panel.unmount()
+
+  const narrow = await mount(15)
+  expect(await narrow.find({ type: 'Text', text: '컨텍스트' })).toBeUndefined()
+  expect(await narrow.find({ type: 'Text', text: 'main' })).toBeDefined()
+  await narrow.unmount()
+})
+
 test('counts background tasks in as they start and out as their notifications end them', async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on)

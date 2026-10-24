@@ -27,10 +27,15 @@ const BAR_WIDTH = 37
 // The shorter bar a desktop band takes once every detail is gone and it still does not fit.
 const BAR_NARROW_WIDTH = 32
 const BAR_HEIGHT = 6
-// Desktop widths in CSS pixels, measured on the app: a `bodyColumns` cell, a text cell
-// (cellsOf counts a Hangul character as two), the sm gap inside an item, and a divider with its xs gaps.
-const COLUMN_PX = 7
-const TEXT_CELL_PX = 6.4
+// Widths in CSS pixels, measured on each surface: a `bodyColumns` cell and a text cell (cellsOf
+// counts a Hangul character as two). VS Code's panel counts its columns by the width of `─` in its
+// own font, a full-width glyph there, so one of its columns holds about two text cells.
+type Metric = { columnPx: number; textCellPx: number }
+const METRICS: Record<'desktop' | 'vscode', Metric> = {
+  desktop: { columnPx: 7, textCellPx: 6.4 },
+  vscode: { columnPx: 13, textCellPx: 6.8 },
+}
+// The sm gap inside an item, and a divider with its xs gaps.
 const GAP_PX = 8
 const DIVIDER_PX = 16
 const SPARE_PX = 16
@@ -91,20 +96,20 @@ function cellsOf(text: string): number {
 
 // The fullest band that fits `columns`, its width in pixels estimated from the texts and bars it
 // would draw; the least of them when none does.
-function fitFor(parts: Part[], tags: string[], columns: number): Fit {
+function fitFor(parts: Part[], tags: string[], columns: number, { columnPx, textCellPx }: Metric): Fit {
   for (const fit of FITS) {
     let px = SPARE_PX
     parts.forEach((part, index) => {
       const detail = part.detailRank > fit.detailsDropped ? part.detail : ''
       const text = part.text + (fit.showsUse ? USE : '') + detail
-      px += (index === 0 ? 0 : DIVIDER_PX) + cellsOf(text) * TEXT_CELL_PX
-      px += fit.showsNames ? cellsOf(part.name) * TEXT_CELL_PX + GAP_PX : 0
+      px += (index === 0 ? 0 : DIVIDER_PX) + cellsOf(text) * textCellPx
+      px += fit.showsNames ? cellsOf(part.name) * textCellPx + GAP_PX : 0
       px += fit.barWidth === 0 ? 0 : fit.barWidth + GAP_PX
     })
     tags.forEach((tag, index) => {
-      px += (parts.length === 0 && index === 0 ? 0 : DIVIDER_PX) + cellsOf(tag) * TEXT_CELL_PX
+      px += (parts.length === 0 && index === 0 ? 0 : DIVIDER_PX) + cellsOf(tag) * textCellPx
     })
-    if (px <= columns * COLUMN_PX) {
+    if (px <= columns * columnPx) {
       return fit
     }
   }
@@ -432,11 +437,11 @@ export const register: Register = on => {
     const tags = [...(branchName === null ? [] : [branchName]), `bg (${running.size})`]
 
     // One row, side by side: the band is wide and short; a faint divider stands between items
-    // so they read as separate figures.
-    if (e.surface === 'desktop') {
+    // so they read as separate figures. VS Code's panel draws Svg too, so it takes the same band.
+    if (e.surface === 'desktop' || e.surface === 'vscode') {
       const { Box, Text, Svg } = $.ui.resolve(e)
       // The row never wraps: as the window narrows the band picks the fullest form in FITS that fits.
-      const fit = fitFor(parts, tags, e.props.bodyColumns)
+      const fit = fitFor(parts, tags, e.props.bodyColumns, METRICS[e.surface])
       return (
         <Box flexDirection="row" alignItems="center" flexWrap="nowrap" columnGap="xs" overflow="hidden">
           {parts.flatMap((part, index) => [
