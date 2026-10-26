@@ -8,9 +8,11 @@ import { runningTasks } from './tasks'
 // The sidebar says it only by a shimmer over a working title and a gray dot on a finished one, and
 // not at all for a session whose turn has ended while its background work goes on:
 //
-//   ● working        ! waiting on the person's answer
-//   ◐ the turn has ended, but background tasks or a side session it started still run
-//   ✓ ended since the person last had it on screen        no mark: ended and seen
+//   🔵 working        ❗ waiting on the person: a question, a plan, a permission or the app's own card
+//   🏃 the turn has ended, but background tasks or a side session it started still run
+//   ✅ ended since the person last had it on screen        no mark: ended and seen
+//
+// Each mark differs from the others in shape as well as color, so they tell apart at a glance.
 //
 // A session is on screen while the app has it attached: the app attaches the session it shows (two in
 // a split view) and lets the others go.
@@ -20,7 +22,7 @@ import { runningTasks } from './tasks'
 // To tell when its side sessions are at work, each writes its status to a small file every few
 // seconds, which the others read.
 
-const turn = atom({ plugin: 'context-band', key: 'turn' } as const, { startedAt: null, endedAt: null, isAsking: false } as TurnReading)
+const turn = atom({ plugin: 'context-band', key: 'turn' } as const, { startedAt: null, endedAt: null } as TurnReading)
 // When the session was last seen on screen; 0 until it is.
 const seen = atom({ plugin: 'context-band', key: 'seen' } as const, 0)
 
@@ -34,10 +36,17 @@ const RENAME_TOOL = 'mcp__ccd_session_mgmt__set_session_title'
 const ASKED_WAIT_MS = 15_000
 // After a rename fails (the person declined it, say), none is asked for this long.
 const FAILED_WAIT_MS = 10 * 60_000
-const MARKS = { asking: '!', working: '●', background: '◐', done: '✓' } as const
+const MARKS = { asking: '❗', working: '🔵', background: '🏃', done: '✅' } as const
 type Mark = keyof typeof MARKS
-// A mark this mod put at a title's front, taken off before another goes on.
-const MARKED = /^[!●◐✓] /
+// A mark this mod put at a title's front, taken off before another goes on: these, or one an earlier
+// version put there (its emoji with the variation selector the app may add, or a plain symbol).
+const MARKED = /^(?:[🔵🏃🟠🟣🟢]|[❗⏳✅]️?|[!●◐✓]) /u
+// Tools whose call is a question to the person, waiting on them from its start.
+const PERSON_TOOLS = ['AskUserQuestion', 'ExitPlanMode']
+// The app's own tools answer at once unless the app asks the person first (a delete to confirm, a
+// session offered): one still running this long waits on them.
+const APP_TOOL_PREFIX = 'mcp__ccd_'
+const APP_WAIT_MS = 2_000
 // The pane an earlier version listed the sessions in.
 const OLD_PANE = 'sessions'
 
@@ -51,6 +60,9 @@ let recordCache: Cached<OwnRecord> | null = null
 const statusCache = new Map<string, Cached<SessionStatus>>()
 // What this session last wrote, without its time, and when.
 let written: { text: string; at: number } | null = null
+// The main loop's tool calls now running, by id: the tool, when it started, and whether a permission
+// dialog was put to the person for it.
+const calls = new Map<string, { tool: string; at: number; isAsked: boolean }>()
 // The title last asked for, and when.
 let asked: { title: string; at: number } | null = null
 let isRenaming = false
@@ -155,9 +167,15 @@ async function busySides($: EngineInterface, paths: Paths, now: number): Promise
     s.parentId === paths.selfId && now - s.at < STALE_MS && (s.isAsking || s.startedAt !== null || s.background > 0)).length
 }
 
+// Whether a call of the main loop waits on the person's answer now.
+function isWaitingOnPerson(now: number): boolean {
+  return [...calls.values()].some(call => call.isAsked || PERSON_TOOLS.includes(call.tool) ||
+    (call.tool.startsWith(APP_TOOL_PREFIX) && now - call.at >= APP_WAIT_MS))
+}
+
 // `seenAt`: when the person last had the session on screen or opened it.
-function markOf(t: TurnReading, tasks: number, sides: number, seenAt: number): Mark | null {
-  if (t.isAsking) {
+function markOf(t: TurnReading, isAsking: boolean, tasks: number, sides: number, seenAt: number): Mark | null {
+  if (isAsking) {
     return 'asking'
   }
   if (t.startedAt !== null) {
@@ -209,9 +227,11 @@ async function refresh($: EngineInterface, isEnding = false): Promise<void> {
   const now = await $.clock.now()
   const own = await ownRecord($, paths)
   const t = await read($, turn)
-  // An ending process takes its background tasks with it.
+  // An ending process takes its turn, its calls and its background tasks with it.
+  const ending = isEnding ? { ...t, startedAt: null } : t
+  const isAsking = !isEnding && isWaitingOnPerson(now)
   const tasks = isEnding ? 0 : await runningTasks($)
-  await publish($, paths, { ...t, ...(isEnding ? { startedAt: null, isAsking: false } : {}), background: tasks, parentId: own?.parentId ?? null }, now)
+  await publish($, paths, { ...ending, isAsking, background: tasks, parentId: own?.parentId ?? null }, now)
   if (own === null) {
     return
   }
@@ -220,8 +240,7 @@ async function refresh($: EngineInterface, isEnding = false): Promise<void> {
     await update($, seen, () => now)
   }
   const seenAt = Math.max(own.lastFocusedAt, await read($, seen))
-  const mark = markOf(isEnding ? { ...t, startedAt: null, isAsking: false } : t, tasks, sides, seenAt)
-  await retitle($, own.title, mark, now)
+  await retitle($, own.title, markOf(ending, isAsking, tasks, sides, seenAt), now)
 }
 
 async function setTurn($: EngineInterface, change: (t: TurnReading) => TurnReading): Promise<void> {
@@ -229,13 +248,28 @@ async function setTurn($: EngineInterface, change: (t: TurnReading) => TurnReadi
   void refresh($).catch(() => {})
 }
 
-// The session waits on the person while `call` runs.
-async function whileAsking<R>($: EngineInterface, call: () => Promise<R>): Promise<R> {
-  await setTurn($, t => ({ ...t, isAsking: true })).catch(() => {})
+// Runs a main-loop tool call, kept among `calls` while it runs so the mark can tell one that waits on
+// the person; a call that did so redraws the mark as it ends. Its own bookkeeping never fails the call.
+export async function watchCall<R>($: EngineInterface, e: { tool: string; tool_use_id: string; agentId?: string }, call: () => Promise<R>): Promise<R> {
+  if (e.agentId !== undefined || e.tool === RENAME_TOOL) {
+    return call()
+  }
+  const at = await $.clock.now().catch(() => 0)
+  calls.set(e.tool_use_id, { tool: e.tool, at, isAsked: false })
+  const timer = e.tool.startsWith(APP_TOOL_PREFIX) ? $.clock.after(APP_WAIT_MS, () => void refresh($).catch(() => {})) : null
+  if (PERSON_TOOLS.includes(e.tool)) {
+    void refresh($).catch(() => {})
+  }
   try {
     return await call()
   } finally {
-    await setTurn($, t => ({ ...t, isAsking: false })).catch(() => {})
+    timer?.cancel()
+    const now = await $.clock.now().catch(() => at)
+    const hasWaited = isWaitingOnPerson(now)
+    calls.delete(e.tool_use_id)
+    if (hasWaited) {
+      void refresh($).catch(() => {})
+    }
   }
 }
 
@@ -260,7 +294,7 @@ export function registerSessions(on: On): void {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       const now = await $.clock.now()
-      await setTurn($, t => ({ ...t, startedAt: now, isAsking: false })).catch(() => {})
+      await setTurn($, t => ({ ...t, startedAt: now })).catch(() => {})
     }
     return next(e)
   })
@@ -268,14 +302,23 @@ export function registerSessions(on: On): void {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       const now = await $.clock.now()
-      await setTurn($, () => ({ startedAt: null, endedAt: now, isAsking: false })).catch(() => {})
+      // A call cut off with the turn never ends on its own.
+      calls.clear()
+      await setTurn($, () => ({ startedAt: null, endedAt: now })).catch(() => {})
     }
     return next(e)
   })
 
-  // A call that waits on the person's answer: a question, or a plan to approve.
-  on('tool.call', { tool: 'AskUserQuestion' }, ($, e, next) => (e.agentId === undefined ? whileAsking($, () => next(e)) : next(e)))
-  on('tool.call', { tool: 'ExitPlanMode' }, ($, e, next) => (e.agentId === undefined ? whileAsking($, () => next(e)) : next(e)))
+  // A permission dialog put to the person for a main-loop call: they are waited on until it ends.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    if (e.agent_id === undefined) {
+      for (const call of calls.values()) {
+        call.isAsked ||= call.tool === e.tool_name
+      }
+      void refresh($).catch(() => {})
+    }
+    return next(e)
+  })
 
   // A closing process takes its mark down to what holds once it is gone: done, or nothing.
   on('session.end', async ($, e, next) => {

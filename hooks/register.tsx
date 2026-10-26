@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { BranchReading, ContextFill, LimitsReading, RateLimit } from '../types'
-import { registerSessions, startSessions } from './sessions'
+import { registerSessions, startSessions, watchCall } from './sessions'
 import { endTasks, runningTasks, startTask, takeAgents } from './tasks'
 
 const fill = atom({ plugin: 'context-band', key: 'fill' } as const, null as ContextFill | null)
@@ -355,9 +355,10 @@ export const register: Register = on => {
     return result
   })
 
-  // Background tasks: counted in when a main-loop call starts one, out when TaskStop ends one.
+  // Background tasks: counted in when a main-loop call starts one, out when TaskStop ends one. The call
+  // is watched while it runs, for the title's mark to tell one that waits on the person.
   on('tool.call', async ($, e, next) => {
-    const result = await next(e)
+    const result = await watchCall($, e as { tool: string; tool_use_id: string; agentId?: string }, () => next(e))
     if (result.result !== undefined && result.isError !== true && e.agentId === undefined) {
       const started = startedTask(e.tool, result.result)
       if (started !== undefined) {

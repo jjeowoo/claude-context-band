@@ -82,20 +82,20 @@ test('marks its title working through a turn, done once it ends off screen, and 
 
   await $.turn.start({ text: 'go', turnId: 't1' })
   await clock.settle()
-  expect(titleOf(disk)).toBe('● 세션 패널')
+  expect(titleOf(disk)).toBe('🔵 세션 패널')
   // The others read its turn from its status.
   expect(JSON.parse(disk.get(`${STATUSES}/local_self.json`)!.text)).toMatchObject({ at: NOW, startedAt: NOW, isAsking: false, background: 0, parentId: null })
 
   await clock.advance(MIN)
   await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.settle()
-  expect(titleOf(disk)).toBe('✓ 세션 패널')
+  expect(titleOf(disk)).toBe('✅ 세션 패널')
 
   // The person opens the session: the app attaches it, and the mark comes off at the next look.
   await clock.advance(MIN)
   screen.isShown = true
   await clock.advance(5000)
-  expect(renames).toEqual(['● 세션 패널', '✓ 세션 패널', '세션 패널'])
+  expect(renames).toEqual(['🔵 세션 패널', '✅ 세션 패널', '세션 패널'])
 
   // ...and stays off once they move on to another session.
   screen.isShown = false
@@ -121,10 +121,10 @@ test('a session on screen as its turn ends gets no done mark, then or after the 
 
   screen.isShown = false
   await clock.advance(MIN)
-  expect(renames).toEqual(['● 세션 패널', '세션 패널'])
+  expect(renames).toEqual(['🔵 세션 패널', '세션 패널'])
 })
 
-test('marks its title ◐ while a side session it started is at work, done once that one ends', async ($, on) => {
+test('marks its title 🏃 while a side session it started is at work, done once that one ends', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   mock.env(on, DESKTOP_ENV)
@@ -142,13 +142,109 @@ test('marks its title ◐ while a side session it started is at work, done once 
   await clock.settle()
   await $.turn.complete({ answer: 'started a side session', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.settle()
-  expect(titleOf(disk)).toBe('◐ 하네스 검증')
+  expect(titleOf(disk)).toBe('🏃 하네스 검증')
 
   await clock.advance(5000)
   put(disk, clock, child, data => ({ ...data, at: clock.now(), startedAt: null, endedAt: clock.now() }))
   await clock.advance(5000)
-  expect(titleOf(disk)).toBe('✓ 하네스 검증')
+  expect(titleOf(disk)).toBe('✅ 하네스 검증')
 })
+
+// A tool call the test holds open until it lets it go.
+function held() {
+  let release = () => {}
+  const until = new Promise<void>(resolve => { release = resolve })
+  return { until, release }
+}
+
+// A desktop session titled `title`, its record on a mocked disk.
+async function desktopSession(on: any, clock: any, title: string) {
+  mock.store(on)
+  mock.env(on, DESKTOP_ENV)
+  const disk = mockDisk(on, clock, { [RECORD]: { sessionId: 'local_self', title, lastFocusedAt: NOW - MIN } })
+  startEngine(on, disk, clock)
+  return disk
+}
+
+test('marks ❗ while the app holds one of its own tools for the person to confirm, not for one it answers at once', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const card = held()
+  on('tool.call', { tool: 'mcp__ccd_session_mgmt__delete_session' }, async () => { await card.until; return { result: { content: 'deleted' } } })
+  on('tool.call', { tool: 'mcp__ccd_session_mgmt__list_sessions' }, () => ({ result: { content: '[]' } }))
+  const disk = await desktopSession(on, clock, '세션 정리')
+
+  await $.session.start({ cwd: 'C:/work', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.tool.call({ tool: 'mcp__ccd_session_mgmt__list_sessions' } as any)
+  await clock.advance(5000)
+  expect(titleOf(disk)).toBe('🔵 세션 정리')
+
+  const deleting = $.tool.call({ tool: 'mcp__ccd_session_mgmt__delete_session', session_id: 'local_x' } as any)
+  await clock.advance(1000)
+  expect(titleOf(disk)).toBe('🔵 세션 정리')
+  await clock.advance(1500)
+  expect(titleOf(disk)).toBe('❗ 세션 정리')
+
+  card.release()
+  await deleting
+  await clock.settle()
+  expect(titleOf(disk)).toBe('🔵 세션 정리')
+})
+
+test('marks ❗ from the start of a question to the person until it is answered', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const answer = held()
+  on('tool.call', { tool: 'AskUserQuestion' }, async () => { await answer.until; return { result: { answers: {} } } })
+  const disk = await desktopSession(on, clock, '설계 질문')
+
+  await $.session.start({ cwd: 'C:/work', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  const asking = $.tool.call({ tool: 'AskUserQuestion', questions: [] } as any)
+  await clock.settle()
+  expect(titleOf(disk)).toBe('❗ 설계 질문')
+
+  answer.release()
+  await asking
+  await clock.settle()
+  expect(titleOf(disk)).toBe('🔵 설계 질문')
+})
+
+test('marks ❗ while a permission dialog is put to the person for a running call', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const dialog = held()
+  on('tool.call', { tool: 'Bash' }, async () => { await dialog.until; return { result: { stdout: '', stderr: '', interrupted: false } } })
+  const disk = await desktopSession(on, clock, '빌드 정리')
+
+  await $.session.start({ cwd: 'C:/work', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  const running = $.tool.call({ tool: 'Bash', command: 'rm -rf build', description: 'clean' } as any)
+  await clock.settle()
+  expect(titleOf(disk)).toBe('🔵 빌드 정리')
+
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'rm -rf build' } }).catch(() => {})
+  await clock.settle()
+  expect(titleOf(disk)).toBe('❗ 빌드 정리')
+
+  dialog.release()
+  await running
+  await clock.settle()
+  expect(titleOf(disk)).toBe('🔵 빌드 정리')
+})
+
+// Marks earlier versions left, one the app gave an emoji variation selector, and one of this version's.
+for (const left of ['◐ 세션 패널', '! 세션 패널', '✅️ 세션 패널', '❗ 세션 패널', '🟢 세션 패널', '⏳ 세션 패널']) {
+  test(`swaps the mark on "${left}" rather than adding another`, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW })
+    mock.store(on)
+    mock.env(on, DESKTOP_ENV)
+    const disk = mockDisk(on, clock, { [RECORD]: { sessionId: 'local_self', title: left, lastFocusedAt: NOW - MIN } })
+    startEngine(on, disk, clock)
+    await $.session.start({ cwd: 'C:/work', surface: 'desktop', isInteractive: true })
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await clock.settle()
+    expect(titleOf(disk)).toBe('🔵 세션 패널')
+  })
+}
 
 test('renames nothing unless a permission rule allows the rename outright', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
