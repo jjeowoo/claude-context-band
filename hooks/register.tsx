@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { BranchReading, ContextFill, LimitsReading, RateLimit } from '../types'
+import { registerSessions, startSessions } from './sessions'
+import { endTasks, runningTasks, startTask, takeAgents } from './tasks'
 
 const fill = atom({ plugin: 'context-band', key: 'fill' } as const, null as ContextFill | null)
 const alerted = atom({ plugin: 'context-band', key: 'alerted' } as const, 0)
@@ -10,12 +12,6 @@ const limits = atom({ plugin: 'context-band', key: 'limits' } as const, null as 
 const minute = atom({ plugin: 'context-band', key: 'minute' } as const, 0)
 // The branch checked out where the session runs; null until checked.
 const branch = atom({ plugin: 'context-band', key: 'branch' } as const, null as BranchReading | null)
-// Ids of the background commands, monitors and remote agents the main loop started and that
-// have not ended; seen as they start, so ones started before the mod loaded are missing.
-const background = atom({ plugin: 'context-band', key: 'background' } as const, [] as string[])
-// Ids of the session's own agents still at work, read from its record of them, so ones started
-// before the mod loaded count too; null until read.
-const agents = atom({ plugin: 'context-band', key: 'agents' } as const, null as string[] | null)
 
 // The limits are the account's, not the session's: the last reading any session got is kept
 // across sessions, so a session that has had no response yet still shows them.
@@ -287,25 +283,6 @@ function startedTask(tool: string, result: unknown): string | undefined {
   return typeof id === 'string' && id !== '' ? id : undefined
 }
 
-const AT_WORK = ['pending', 'running', 'waiting']
-
-// The main loop's agents still at work: what the background tasks pane lists at its top level.
-async function liveAgents($: EngineInterface): Promise<string[]> {
-  try {
-    return (await $.agent.list()).filter(a => a.parentId === undefined && AT_WORK.includes(a.status)).map(a => a.id)
-  } catch {
-    return []
-  }
-}
-
-async function takeAgents($: EngineInterface): Promise<void> {
-  const ids = await liveAgents($)
-  const current = await read($, agents)
-  if (current === null || current.join() !== ids.join()) {
-    await update($, agents, () => ids)
-  }
-}
-
 // The tasks a notification row says have ended: each <task-id> with an ending <status> after it.
 function endedTasks(content: unknown): string[] {
   const text = typeof content === 'string' ? content : JSON.stringify(content)
@@ -342,6 +319,7 @@ export const register: Register = on => {
     $.clock.every(5_000, () => {
       void takeAgents($).catch(() => {})
     })
+    await startSessions($)
     return result
   })
 
@@ -383,11 +361,11 @@ export const register: Register = on => {
     if (result.result !== undefined && result.isError !== true && e.agentId === undefined) {
       const started = startedTask(e.tool, result.result)
       if (started !== undefined) {
-        await update($, background, ids => (ids.includes(started) ? ids : [...ids, started])).catch(() => {})
+        await startTask($, started).catch(() => {})
       }
       const stopped = e.tool === 'TaskStop' ? (result.result as { task_id?: unknown }).task_id : undefined
       if (typeof stopped === 'string') {
-        await update($, background, ids => ids.filter(id => id !== stopped)).catch(() => {})
+        await endTasks($, [stopped]).catch(() => {})
       }
     }
     if (e.tool === 'Agent' || e.tool === 'TaskStop') {
@@ -401,7 +379,7 @@ export const register: Register = on => {
     if (e.origin.kind === 'task-notification') {
       const ended = endedTasks(e.message.content)
       if (ended.length > 0) {
-        await update($, background, ids => ids.filter(id => !ended.includes(id))).catch(() => {})
+        await endTasks($, ended).catch(() => {})
       }
       await takeAgents($).catch(() => {})
     }
@@ -433,8 +411,7 @@ export const register: Register = on => {
     // Checked here when the session opened without a fresh start.
     const branchName = shortBranch(((await read($, branch)) ?? (await currentBranch($))).name)
     // Tags after the figures, never given up: the branch, and how many background tasks run.
-    const running = new Set([...(await read($, background)), ...((await read($, agents)) ?? (await liveAgents($)))])
-    const tags = [...(branchName === null ? [] : [branchName]), `bg (${running.size})`]
+    const tags = [...(branchName === null ? [] : [branchName]), `bg (${await runningTasks($)})`]
 
     // One row, side by side: the band is wide and short; a faint divider stands between items
     // so they read as separate figures. VS Code's panel draws Svg too, so it takes the same band.
@@ -487,4 +464,7 @@ export const register: Register = on => {
       </Box>
     )
   })
+
+  // In the desktop app, what the session is doing, marked at the front of its title in the sidebar.
+  registerSessions(on)
 }
