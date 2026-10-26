@@ -10,6 +10,6 @@ export type TurnReading = { startedAt: number | null; endedAt: number | null }
 
 declare module 'claude-code' {
   interface PluginState {
-    'context-band': { fill: ContextFill | null; alerted: number; limits: LimitsReading | null; minute: number; branch: BranchReading | null; background: string[]; agents: string[] | null; turn: TurnReading; seen: number }
+    'context-band': { fill: ContextFill | null; alerted: number; limits: LimitsReading | null; minute: number; branch: BranchReading | null; background: string[]; agents: string[] | null; turn: TurnReading; seen: number; question: boolean }
   }
 }

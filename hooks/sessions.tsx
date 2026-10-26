@@ -8,7 +8,9 @@ import { runningTasks } from './tasks'
 // The sidebar says it only by a shimmer over a working title and a gray dot on a finished one, and
 // not at all for a session whose turn has ended while its background work goes on:
 //
-//   🔵 working        ❗ waiting on the person: a question, a plan, a permission or the app's own card
+//   ❗ stopped mid-turn for the person: a question, a plan, a permission or the app's own card
+//   🔵 working
+//   🔔 the turn has ended on a question for the person, until they answer it
 //   🏃 the turn has ended, but background tasks it started still run
 //   ✅ ended since the person last had it on screen        no mark: ended and seen
 //
@@ -24,6 +26,8 @@ import { runningTasks } from './tasks'
 const turn = atom({ plugin: 'context-band', key: 'turn' } as const, { startedAt: null, endedAt: null } as TurnReading)
 // When the session was last seen on screen; 0 until it is.
 const seen = atom({ plugin: 'context-band', key: 'seen' } as const, 0)
+// Whether the main loop's closing box put a question to the person this turn; cleared as the next starts.
+const question = atom({ plugin: 'context-band', key: 'question' } as const, false)
 
 const TICK_MS = 5_000
 const RENAME_TOOL = 'mcp__ccd_session_mgmt__set_session_title'
@@ -31,11 +35,11 @@ const RENAME_TOOL = 'mcp__ccd_session_mgmt__set_session_title'
 const ASKED_WAIT_MS = 15_000
 // After a rename fails (the person declined it, say), none is asked for this long.
 const FAILED_WAIT_MS = 10 * 60_000
-const MARKS = { asking: '❗', working: '🔵', background: '🏃', done: '✅' } as const
+const MARKS = { asking: '❗', working: '🔵', replied: '🔔', background: '🏃', done: '✅' } as const
 type Mark = keyof typeof MARKS
 // A mark this mod put at a title's front, taken off before another goes on: these, or one an earlier
 // version put there (its emoji with the variation selector the app may add, or a plain symbol).
-const MARKED = /^(?:[🔵🏃🟠🟣🟢]|[❗⏳✅]️?|[!●◐✓]) /u
+const MARKED = /^(?:[🔵🔔💬🏃🟠🟣🟢]|[❗⏳✅]️?|[!●◐✓]) /u
 // Tools whose call is a question to the person, waiting on them from its start.
 const PERSON_TOOLS = ['AskUserQuestion', 'ExitPlanMode']
 // The app's own tools answer at once unless the app asks the person first (a delete to confirm, a
@@ -45,8 +49,10 @@ const APP_WAIT_MS = 2_000
 // The pane an earlier version listed the sessions in.
 const OLD_PANE = 'sessions'
 
-// What the app's record of this session says of it.
-type OwnRecord = { title: string; lastFocusedAt: number }
+// What the app's record of this session says of it. `question`: what the last turn's closing box left
+// the person to answer when it stopped the work for them (`blocked`), which the app clears as the next
+// turn starts; one that can wait is not recorded, and is caught from the box's call instead.
+type OwnRecord = { title: string; lastFocusedAt: number; question: string | null }
 // The record parsed, and the time and size it was read at, which tell when it changed.
 type Cached = { stamp: string; value: OwnRecord | null }
 
@@ -77,7 +83,12 @@ function toRecord(data: unknown): OwnRecord | null {
   if (typeof d !== 'object' || d === null || typeof d.title !== 'string') {
     return null
   }
-  return { title: d.title, lastFocusedAt: typeof d.lastFocusedAt === 'number' ? d.lastFocusedAt : 0 }
+  const question = (d.turnWrapUp as { needsUser?: unknown } | null | undefined)?.needsUser
+  return {
+    title: d.title,
+    lastFocusedAt: typeof d.lastFocusedAt === 'number' ? d.lastFocusedAt : 0,
+    question: typeof question === 'string' && question.trim() !== '' ? question : null,
+  }
 }
 
 // The app's record of this session, read again only once it changed; one half written keeps what it
@@ -101,13 +112,17 @@ function isWaitingOnPerson(now: number): boolean {
     (call.tool.startsWith(APP_TOOL_PREFIX) && now - call.at >= APP_WAIT_MS))
 }
 
-// `seenAt`: when the person last had the session on screen or opened it.
-function markOf(t: TurnReading, isAsking: boolean, tasks: number, seenAt: number): Mark | null {
+// `hasQuestion`: the last turn ended on a question for the person. `seenAt`: when they last had the
+// session on screen or opened it; a question stays marked until answered, seen or not.
+function markOf(t: TurnReading, isAsking: boolean, hasQuestion: boolean, tasks: number, seenAt: number): Mark | null {
   if (isAsking) {
     return 'asking'
   }
   if (t.startedAt !== null) {
     return 'working'
+  }
+  if (hasQuestion) {
+    return 'replied'
   }
   if (tasks > 0) {
     return 'background'
@@ -160,9 +175,10 @@ async function refresh($: EngineInterface, isEnding = false): Promise<void> {
   }
   const seenAt = Math.max(own.lastFocusedAt, await read($, seen))
   // An ending process takes its turn, its calls and its background tasks with it.
+  const hasQuestion = (await read($, question)) || own.question !== null
   const mark = isEnding
-    ? markOf({ ...t, startedAt: null }, false, 0, seenAt)
-    : markOf(t, isWaitingOnPerson(now), await runningTasks($), seenAt)
+    ? markOf({ ...t, startedAt: null }, false, hasQuestion, 0, seenAt)
+    : markOf(t, isWaitingOnPerson(now), hasQuestion, await runningTasks($), seenAt)
   await retitle($, own.title, mark, now)
 }
 
@@ -217,7 +233,17 @@ export function registerSessions(on: On): void {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       const now = await $.clock.now()
+      await update($, question, () => false).catch(() => {})
       await setTurn($, t => ({ ...t, startedAt: now })).catch(() => {})
+    }
+    return next(e)
+  })
+
+  // The turn's closing box: a question in it leaves the person to answer once the turn ends.
+  on('tool.call', { tool: 'mcp__ccd_turn__wrap_up' }, async ($, e, next) => {
+    const ask = (e as { ask?: unknown }).ask
+    if (e.agentId === undefined && typeof ask === 'string' && ask.trim() !== '') {
+      await update($, question, () => true).catch(() => {})
     }
     return next(e)
   })

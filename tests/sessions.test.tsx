@@ -146,6 +146,53 @@ test('marks its title 🏃 while a background task it started runs past its turn
   expect(titleOf(disk)).toBe('✅ 하네스 검증')
 })
 
+test('marks 🔔 once a turn ends on a question for the person, over its background work and seen or not, until the next turn', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on)
+  mock.env(on, DESKTOP_ENV)
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1' } }))
+  on('tool.call', { tool: 'mcp__ccd_turn__wrap_up' }, () => ({ result: { content: 'Shown in the next-step box.' } }))
+  const disk = mockDisk(on, clock, { [RECORD]: { sessionId: 'local_self', title: '하네스 개선', lastFocusedAt: NOW - MIN } })
+  const screen = { isShown: false }
+  startEngine(on, disk, clock, 'allow', screen)
+  const end = async (turnId: string, ask?: string) => {
+    await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: '고쳤습니다.', ...(ask === undefined ? {} : { ask }) } as any)
+    await $.turn.complete({ answer: ask ?? '끝났습니다.', durationMs: 1000, isAborted: false, turnId, reason: 'answer' })
+    await clock.settle()
+  }
+
+  await $.session.start({ cwd: 'C:/work', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'tests', run_in_background: true } as any)
+  await end('t1', '커밋할까요?')
+  expect(titleOf(disk)).toBe('🔔 하네스 개선')
+
+  // Opening the session answers nothing.
+  screen.isShown = true
+  await clock.advance(5000)
+  expect(titleOf(disk)).toBe('🔔 하네스 개선')
+
+  // The person answers, and the next turn ends with nothing left to them.
+  await $.turn.start({ text: '커밋해', turnId: 't2' })
+  await clock.settle()
+  expect(titleOf(disk)).toBe('🔵 하네스 개선')
+  await end('t2')
+  expect(titleOf(disk)).toBe('🏃 하네스 개선')
+})
+
+test('marks 🔔 for a question that stopped the work, which the app keeps in its record', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on)
+  mock.env(on, DESKTOP_ENV)
+  const disk = mockDisk(on, clock, { [RECORD]: { sessionId: 'local_self', title: 'marktext', lastFocusedAt: NOW - MIN, turnWrapUp: { description: '못 했습니다.', needsUser: 'MarkText를 닫으면 알려 주실래요?' } } })
+  startEngine(on, disk, clock)
+
+  // A process started after the turn that asked, as when the app opens the session again.
+  await $.session.start({ cwd: 'C:/work', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  expect(titleOf(disk)).toBe('🔔 marktext')
+})
+
 // A tool call the test holds open until it lets it go.
 function held() {
   let release = () => {}
@@ -228,7 +275,7 @@ test('marks ❗ while a permission dialog is put to the person for a running cal
 })
 
 // Marks earlier versions left, one the app gave an emoji variation selector, and one of this version's.
-for (const left of ['◐ 세션 패널', '! 세션 패널', '✅️ 세션 패널', '❗ 세션 패널', '🟢 세션 패널', '⏳ 세션 패널']) {
+for (const left of ['◐ 세션 패널', '! 세션 패널', '✅️ 세션 패널', '❗ 세션 패널', '🟢 세션 패널', '⏳ 세션 패널', '💬 세션 패널']) {
   test(`swaps the mark on "${left}" rather than adding another`, async ($, on) => {
     const clock = mock.clock(on, { now: NOW })
     mock.store(on)
