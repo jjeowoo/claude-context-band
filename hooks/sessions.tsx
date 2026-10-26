@@ -10,7 +10,10 @@ import { runningTasks } from './tasks'
 //
 //   ● working        ! waiting on the person's answer
 //   ◐ the turn has ended, but background tasks or a side session it started still run
-//   ✓ ended since the person last opened it        no mark: ended and seen
+//   ✓ ended since the person last had it on screen        no mark: ended and seen
+//
+// A session is on screen while the app has it attached: the app attaches the session it shows (two in
+// a split view) and lets the others go.
 //
 // Each session marks only its own title, through the app's own rename tool, and only while a
 // permission rule allows that tool outright: a mark is never worth a dialog or a classifier's call.
@@ -18,6 +21,8 @@ import { runningTasks } from './tasks'
 // seconds, which the others read.
 
 const turn = atom({ plugin: 'context-band', key: 'turn' } as const, { startedAt: null, endedAt: null, isAsking: false } as TurnReading)
+// When the session was last seen on screen; 0 until it is.
+const seen = atom({ plugin: 'context-band', key: 'seen' } as const, 0)
 
 const TICK_MS = 5_000
 // A status is written again this often while nothing changes, so the others can tell its process
@@ -150,7 +155,8 @@ async function busySides($: EngineInterface, paths: Paths, now: number): Promise
     s.parentId === paths.selfId && now - s.at < STALE_MS && (s.isAsking || s.startedAt !== null || s.background > 0)).length
 }
 
-function markOf(t: TurnReading, tasks: number, sides: number, lastFocusedAt: number): Mark | null {
+// `seenAt`: when the person last had the session on screen or opened it.
+function markOf(t: TurnReading, tasks: number, sides: number, seenAt: number): Mark | null {
   if (t.isAsking) {
     return 'asking'
   }
@@ -160,7 +166,7 @@ function markOf(t: TurnReading, tasks: number, sides: number, lastFocusedAt: num
   if (tasks > 0 || sides > 0) {
     return 'background'
   }
-  return t.endedAt !== null && lastFocusedAt < t.endedAt ? 'done' : null
+  return t.endedAt !== null && seenAt < t.endedAt ? 'done' : null
 }
 
 // Puts `mark` at the front of the title in place of the one there, through the app's rename tool.
@@ -210,7 +216,11 @@ async function refresh($: EngineInterface, isEnding = false): Promise<void> {
     return
   }
   const sides = isEnding ? 0 : await busySides($, paths, now)
-  const mark = markOf(isEnding ? { ...t, startedAt: null, isAsking: false } : t, tasks, sides, own.lastFocusedAt)
+  if (!isEnding && (await $.session.surfaces()).length > 0) {
+    await update($, seen, () => now)
+  }
+  const seenAt = Math.max(own.lastFocusedAt, await read($, seen))
+  const mark = markOf(isEnding ? { ...t, startedAt: null, isAsking: false } : t, tasks, sides, seenAt)
   await retitle($, own.title, mark, now)
 }
 

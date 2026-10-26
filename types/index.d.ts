@@ -13,6 +13,6 @@ export type SessionStatus = TurnReading & { at: number; background: number; pare
 
 declare module 'claude-code' {
   interface PluginState {
-    'context-band': { fill: ContextFill | null; alerted: number; limits: LimitsReading | null; minute: number; branch: BranchReading | null; background: string[]; agents: string[] | null; turn: TurnReading }
+    'context-band': { fill: ContextFill | null; alerted: number; limits: LimitsReading | null; minute: number; branch: BranchReading | null; background: string[]; agents: string[] | null; turn: TurnReading; seen: number }
   }
 }

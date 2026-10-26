@@ -45,10 +45,14 @@ function put(disk: Disk, clock: { now: () => number }, path: string, change: (da
   disk.set(path, { text: JSON.stringify(data), mtimeMs: clock.now() })
 }
 
+// Whether the app has the session on screen, which a test turns on and off.
+type Screen = { isShown: boolean }
+
 // The engine of a desktop session whose app renames it as asked, and the titles asked for.
-function startEngine(on: any, disk: Disk, clock: { now: () => number }, decision = 'allow'): string[] {
+function startEngine(on: any, disk: Disk, clock: { now: () => number }, decision = 'allow', screen: Screen = { isShown: false }): string[] {
   const renames: string[] = []
   on('session.start', (_$: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  on('session.surfaces', () => ({ value: screen.isShown ? ['desktop'] : [] }))
   on('session.repo', () => ({ value: null }))
   on('ui.panes', () => ({ value: [] }))
   on('turn.start', (_$: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
@@ -64,12 +68,13 @@ function startEngine(on: any, disk: Disk, clock: { now: () => number }, decision
 
 const titleOf = (disk: Disk) => JSON.parse(disk.get(RECORD)!.text).title
 
-test('marks its title working through a turn, done once it ends, and plain once opened again', async ($, on) => {
+test('marks its title working through a turn, done once it ends off screen, and plain once opened again', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   mock.env(on, DESKTOP_ENV)
   const disk = mockDisk(on, clock, { [RECORD]: { sessionId: 'local_self', title: '세션 패널', lastFocusedAt: NOW - MIN } })
-  const renames = startEngine(on, disk, clock)
+  const screen = { isShown: false }
+  const renames = startEngine(on, disk, clock, 'allow', screen)
 
   await $.session.start({ cwd: 'C:/work', surface: 'desktop', isInteractive: true })
   // Nothing has run yet: the title stays as the app named it.
@@ -86,11 +91,37 @@ test('marks its title working through a turn, done once it ends, and plain once 
   await clock.settle()
   expect(titleOf(disk)).toBe('✓ 세션 패널')
 
-  // The person opens the session: the app records it, and the mark comes off at the next look.
+  // The person opens the session: the app attaches it, and the mark comes off at the next look.
   await clock.advance(MIN)
-  put(disk, clock, RECORD, data => ({ ...data, lastFocusedAt: clock.now() }))
+  screen.isShown = true
   await clock.advance(5000)
   expect(renames).toEqual(['● 세션 패널', '✓ 세션 패널', '세션 패널'])
+
+  // ...and stays off once they move on to another session.
+  screen.isShown = false
+  await clock.advance(MIN)
+  expect(titleOf(disk)).toBe('세션 패널')
+})
+
+test('a session on screen as its turn ends gets no done mark, then or after the person leaves it', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on)
+  mock.env(on, DESKTOP_ENV)
+  // Opened long before: the app's own record says nothing of the person watching since.
+  const disk = mockDisk(on, clock, { [RECORD]: { sessionId: 'local_self', title: '세션 패널', lastFocusedAt: NOW - 30 * MIN } })
+  const screen = { isShown: true }
+  const renames = startEngine(on, disk, clock, 'allow', screen)
+
+  await $.session.start({ cwd: 'C:/work', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await clock.advance(MIN)
+  await $.turn.complete({ answer: 'done', durationMs: MIN, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.settle()
+  expect(titleOf(disk)).toBe('세션 패널')
+
+  screen.isShown = false
+  await clock.advance(MIN)
+  expect(renames).toEqual(['● 세션 패널', '세션 패널'])
 })
 
 test('marks its title ◐ while a side session it started is at work, done once that one ends', async ($, on) => {
