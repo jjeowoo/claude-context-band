@@ -4,7 +4,6 @@ const NOW = Date.parse('2026-10-26T10:00:00Z')
 const MIN = 60_000
 
 const RECORDS = 'C:/Users/u/AppData/Roaming/Claude/claude-code-sessions/acc/org'
-const STATUSES = 'C:/Users/u/.claude/context-band/sessions'
 const RECORD = `${RECORDS}/local_self.json`
 const DESKTOP_ENV = {
   CLAUDE_CODE_HOST_SESSION_ID: 'local_self',
@@ -83,8 +82,6 @@ test('marks its title working through a turn, done once it ends off screen, and 
   await $.turn.start({ text: 'go', turnId: 't1' })
   await clock.settle()
   expect(titleOf(disk)).toBe('🔵 세션 패널')
-  // The others read its turn from its status.
-  expect(JSON.parse(disk.get(`${STATUSES}/local_self.json`)!.text)).toMatchObject({ at: NOW, startedAt: NOW, isAsking: false, background: 0, parentId: null })
 
   await clock.advance(MIN)
   await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
@@ -124,29 +121,27 @@ test('a session on screen as its turn ends gets no done mark, then or after the 
   expect(renames).toEqual(['🔵 세션 패널', '세션 패널'])
 })
 
-test('marks its title 🏃 while a side session it started is mid-turn, done once that turn ends', async ($, on) => {
+test('marks its title 🏃 while a background task it started runs past its turn, done once the task ends', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   mock.env(on, DESKTOP_ENV)
-  const child = `${STATUSES}/local_child.json`
-  const disk = mockDisk(on, clock, {
-    [RECORD]: { sessionId: 'local_self', title: '하네스 검증', lastFocusedAt: NOW - MIN },
-    [child]: { at: NOW, startedAt: NOW - MIN, endedAt: null, isAsking: false, background: 0, parentId: 'local_self' },
-    // Another session's side session, at work too: not this one's.
-    [`${STATUSES}/local_other.json`]: { at: NOW, startedAt: NOW - MIN, endedAt: null, isAsking: false, background: 0, parentId: 'local_x' },
-  })
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1' } }))
+  const disk = mockDisk(on, clock, { [RECORD]: { sessionId: 'local_self', title: '하네스 검증', lastFocusedAt: NOW - MIN } })
   startEngine(on, disk, clock)
 
   await $.session.start({ cwd: 'C:/work', surface: 'desktop', isInteractive: true })
   await $.turn.start({ text: 'go', turnId: 't1' })
-  await clock.settle()
-  await $.turn.complete({ answer: 'started a side session', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'tests', run_in_background: true } as any)
+  await $.turn.complete({ answer: 'tests running', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.settle()
   expect(titleOf(disk)).toBe('🏃 하네스 검증')
 
-  // The side session's turn ends with an agent of its own still at work: that one is its own 🏃.
-  await clock.advance(5000)
-  put(disk, clock, child, data => ({ ...data, at: clock.now(), startedAt: null, endedAt: clock.now(), background: 1 }))
+  await $.session.append({
+    message: { type: 'user', role: 'user', content: '<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>' },
+    door: 'notification',
+    origin: { kind: 'task-notification' },
+    uuid: 'row-b1',
+  } as any)
   await clock.advance(5000)
   expect(titleOf(disk)).toBe('✅ 하네스 검증')
 })
