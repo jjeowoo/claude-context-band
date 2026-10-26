@@ -124,7 +124,7 @@ test('a session on screen as its turn ends gets no done mark, then or after the 
   expect(renames).toEqual(['🔵 세션 패널', '세션 패널'])
 })
 
-test('marks its title 🏃 while a side session it started is at work, done once that one ends', async ($, on) => {
+test('marks its title 🏃 while a side session it started is mid-turn, done once that turn ends', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   mock.env(on, DESKTOP_ENV)
@@ -144,8 +144,9 @@ test('marks its title 🏃 while a side session it started is at work, done once
   await clock.settle()
   expect(titleOf(disk)).toBe('🏃 하네스 검증')
 
+  // The side session's turn ends with an agent of its own still at work: that one is its own 🏃.
   await clock.advance(5000)
-  put(disk, clock, child, data => ({ ...data, at: clock.now(), startedAt: null, endedAt: clock.now() }))
+  put(disk, clock, child, data => ({ ...data, at: clock.now(), startedAt: null, endedAt: clock.now(), background: 1 }))
   await clock.advance(5000)
   expect(titleOf(disk)).toBe('✅ 하네스 검증')
 })

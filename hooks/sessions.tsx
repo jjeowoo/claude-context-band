@@ -9,7 +9,7 @@ import { runningTasks } from './tasks'
 // not at all for a session whose turn has ended while its background work goes on:
 //
 //   🔵 working        ❗ waiting on the person: a question, a plan, a permission or the app's own card
-//   🏃 the turn has ended, but background tasks or a side session it started still run
+//   🏃 the turn has ended, but background tasks still run or a side session it started is mid-turn
 //   ✅ ended since the person last had it on screen        no mark: ended and seen
 //
 // Each mark differs from the others in shape as well as color, so they tell apart at a glance.
@@ -158,13 +158,14 @@ async function publish($: EngineInterface, paths: Paths, status: Omit<SessionSta
   written = { text, at: now }
 }
 
-// How many side sessions this one started are at work now, by their own statuses.
+// How many side sessions this one started have a turn running now, by their own statuses. One whose
+// turn has ended while its own background tasks run is marked 🏃 itself, and not counted here again.
 async function busySides($: EngineInterface, paths: Paths, now: number): Promise<number> {
   const entries = (await $.fs.list(paths.statuses).catch(() => [] as FsEntry[]))
     .filter(e => e.kind === 'file' && e.name.endsWith('.json') && e.name !== `${paths.selfId}.json`)
   const statuses = await readChanged($, paths.statuses, entries, statusCache, toStatus)
   return [...statuses.values()].filter(s =>
-    s.parentId === paths.selfId && now - s.at < STALE_MS && (s.isAsking || s.startedAt !== null || s.background > 0)).length
+    s.parentId === paths.selfId && now - s.at < STALE_MS && (s.isAsking || s.startedAt !== null)).length
 }
 
 // Whether a call of the main loop waits on the person's answer now.
