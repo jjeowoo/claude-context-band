@@ -23,13 +23,16 @@ const BAR_WIDTH = 37
 // The shorter bar a desktop band takes once every detail is gone and it still does not fit.
 const BAR_NARROW_WIDTH = 32
 const BAR_HEIGHT = 6
-// Widths in CSS pixels, measured on each surface: a `bodyColumns` cell and a text cell (cellsOf
-// counts a Hangul character as two). VS Code's panel counts its columns by the width of `─` in its
-// own font, a full-width glyph there, so one of its columns holds about two text cells.
+// The band's text, a step under the body's so it sits quieter than the conversation.
+const TEXT_SIZE = 'footnote'
+// Widths in CSS pixels, measured on each surface: a `bodyColumns` cell and a text cell at TEXT_SIZE
+// (cellsOf counts a Hangul character as two; the body-size cells measured 6.4 and 6.8, scaled down).
+// VS Code's panel counts its columns by the width of `─` in its own font, a full-width glyph there,
+// so one of its columns holds about two text cells.
 type Metric = { columnPx: number; textCellPx: number }
 const METRICS: Record<'desktop' | 'vscode', Metric> = {
-  desktop: { columnPx: 7, textCellPx: 6.4 },
-  vscode: { columnPx: 13, textCellPx: 6.8 },
+  desktop: { columnPx: 7, textCellPx: 5.9 },
+  vscode: { columnPx: 13, textCellPx: 6.2 },
 }
 // The gap on either side of a bar, the same before and after it, and a divider with its xs gaps.
 const GAP_PX = 4
@@ -413,21 +416,21 @@ export const register: Register = on => {
       return (
         <Box flexDirection="row" alignItems="center" flexWrap="nowrap" columnGap="xs" overflow="hidden">
           {parts.flatMap((part, index) => [
-            ...(index === 0 ? [] : [<Text key={`divider-${part.name}`} size="body" dimColor>│</Text>]),
+            ...(index === 0 ? [] : [<Text key={`divider-${part.name}`} size={TEXT_SIZE} dimColor>│</Text>]),
             // A small inset before 컨텍스트 alone, off the band's left edge.
             <Box key={part.name} flexDirection="row" alignItems="center" columnGap={GAPS[e.surface]} {...(index === 0 ? { marginLeft: 0.25 } : {})}>
-              {fit.showsNames ? <Text size="body" dimColor>{part.name}</Text> : null}
+              {fit.showsNames ? <Text size={TEXT_SIZE} dimColor>{part.name}</Text> : null}
               {fit.barWidth === 0 ? null : (
                 <Svg source={barSvg(part.percent, levelOf(part.percent), fit.barWidth)} alt={`${part.name} ${part.text}${part.detail}`} width={fit.barWidth} height={BAR_HEIGHT} />
               )}
-              <Text size="body" dimColor>{part.text}{part.detailRank > fit.detailsDropped ? part.detail : ''}</Text>
+              <Text size={TEXT_SIZE} dimColor>{part.text}{part.detailRank > fit.detailsDropped ? part.detail : ''}</Text>
             </Box>,
           ])}
           {/* Each tag wraps with its divider, so no divider is left at a row's end. */}
           {tags.map((tag, index) => (
             <Box key={`tag-${index}`} flexDirection="row" alignItems="center" columnGap="xs">
-              {parts.length === 0 && index === 0 ? null : <Text size="body" dimColor>│</Text>}
-              <Text size="body" dimColor>{tag}</Text>
+              {parts.length === 0 && index === 0 ? null : <Text size={TEXT_SIZE} dimColor>│</Text>}
+              <Text size={TEXT_SIZE} dimColor>{tag}</Text>
             </Box>
           ))}
         </Box>
