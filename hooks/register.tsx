@@ -8,7 +8,7 @@ import { endTasks, runningTasks, startTask, takeAgents } from './tasks'
 const fill = atom({ plugin: 'context-band', key: 'fill' } as const, null as ContextFill | null)
 const alerted = atom({ plugin: 'context-band', key: 'alerted' } as const, 0)
 const limits = atom({ plugin: 'context-band', key: 'limits' } as const, null as LimitsReading | null)
-// Bumped every minute so the reset countdowns redraw.
+// Bumped every minute so a window whose reset has passed drops from the band.
 const minute = atom({ plugin: 'context-band', key: 'minute' } as const, 0)
 // The branch checked out where the session runs; null until checked.
 const branch = atom({ plugin: 'context-band', key: 'branch' } as const, null as BranchReading | null)
@@ -31,8 +31,10 @@ const METRICS: Record<'desktop' | 'vscode', Metric> = {
   desktop: { columnPx: 7, textCellPx: 6.4 },
   vscode: { columnPx: 13, textCellPx: 6.8 },
 }
-// The sm gap inside an item, and a divider with its xs gaps.
-const GAP_PX = 8
+// The gap on either side of a bar, the same before and after it, and a divider with its xs gaps.
+const GAP_PX = 4
+// Desktop's xs step; VS Code draws xs as a whole cell, so half of one.
+const GAPS = { desktop: 'xs', vscode: 0.5 } as const
 const DIVIDER_PX = 16
 const SPARE_PX = 16
 const BRANCH_MAX = 24
@@ -43,26 +45,23 @@ const LIMIT_ORDER = ['five_hour', 'seven_day', 'spend_limit']
 type Level = keyof typeof FILL_COLORS
 // `detail` is the parenthesized rest, the first thing a narrow band gives up, one item at a time in
 // `detailRank` order: the context's token counts (1, the percent already says it), the weekly reset
-// (2, days off), then the session's countdown (3, the one that matters soonest).
+// (2, days off), then the session's reset (3, the one that matters soonest).
 type Part = { name: string; percent: number; text: string; detail: string; detailRank: number }
 const DETAIL_RANKS: Record<string, number> = { seven_day: 2, five_hour: 3 }
-// Said after each percent while there is room; a word the percent can do without.
-const USE = ' 사용'
 // What a desktop band shows at a given width, from the whole of it to the least, each step giving
-// up one thing more: the token counts, the weekly reset, the word 사용, the session's countdown,
-// shorter bars, the bars, and the item names. The percents and the tags (the branch, the
+// up one thing more: the token counts, the weekly reset, the session's reset, shorter bars,
+// the bars, and the item names. The percents and the tags (the branch, the
 // background count) always stay: "14% │ 6% │ 12% │ main │ bg (0)" is the least a band shows.
 // `detailsDropped`: the details of that rank and below are left out.
-type Fit = { barWidth: number; detailsDropped: number; showsUse: boolean; showsNames: boolean }
+type Fit = { barWidth: number; detailsDropped: number; showsNames: boolean }
 const FITS: Fit[] = [
-  { barWidth: BAR_WIDTH, detailsDropped: 0, showsUse: true, showsNames: true },
-  { barWidth: BAR_WIDTH, detailsDropped: 1, showsUse: true, showsNames: true },
-  { barWidth: BAR_WIDTH, detailsDropped: 2, showsUse: true, showsNames: true },
-  { barWidth: BAR_WIDTH, detailsDropped: 2, showsUse: false, showsNames: true },
-  { barWidth: BAR_WIDTH, detailsDropped: 9, showsUse: false, showsNames: true },
-  { barWidth: BAR_NARROW_WIDTH, detailsDropped: 9, showsUse: false, showsNames: true },
-  { barWidth: 0, detailsDropped: 9, showsUse: false, showsNames: true },
-  { barWidth: 0, detailsDropped: 9, showsUse: false, showsNames: false },
+  { barWidth: BAR_WIDTH, detailsDropped: 0, showsNames: true },
+  { barWidth: BAR_WIDTH, detailsDropped: 1, showsNames: true },
+  { barWidth: BAR_WIDTH, detailsDropped: 2, showsNames: true },
+  { barWidth: BAR_WIDTH, detailsDropped: 9, showsNames: true },
+  { barWidth: BAR_NARROW_WIDTH, detailsDropped: 9, showsNames: true },
+  { barWidth: 0, detailsDropped: 9, showsNames: true },
+  { barWidth: 0, detailsDropped: 9, showsNames: false },
 ]
 
 function levelOf(percent: number): Level {
@@ -97,7 +96,7 @@ function fitFor(parts: Part[], tags: string[], columns: number, { columnPx, text
     let px = SPARE_PX
     parts.forEach((part, index) => {
       const detail = part.detailRank > fit.detailsDropped ? part.detail : ''
-      const text = part.text + (fit.showsUse ? USE : '') + detail
+      const text = part.text + detail
       px += (index === 0 ? 0 : DIVIDER_PX) + cellsOf(text) * textCellPx
       px += fit.showsNames ? cellsOf(part.name) * textCellPx + GAP_PX : 0
       px += fit.barWidth === 0 ? 0 : fit.barWidth + GAP_PX
@@ -116,22 +115,13 @@ function formatTokens(n: number): string {
   return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
 }
 
-// " (4시간 23분 후 재설정)", " (2일 5시간 후 재설정)", " (12분 후 재설정)", counted from now so it never needs the time zone.
-function untilText(at: number, now: number): string {
-  const minutes = Math.max(0, Math.floor((at - now) / 60000))
-  const days = Math.floor(minutes / 1440)
-  const hours = Math.floor((minutes % 1440) / 60)
-  const mins = minutes % 60
-  const span = days > 0 ? `${days}일 ${hours}시간` : hours > 0 ? `${hours}시간 ${mins}분` : `${mins}분`
-  return ` (${span} 후 재설정)`
-}
-
-// The weekly reset as a weekday and a 24-hour time in the person's own time zone:
-// " (금요일 03:00 재설정)".
-function resetAtText(at: number): string {
+// The reset as a 24-hour time in the person's own time zone: " (01:20에 초기화)" for the session,
+// which resets within hours; the longer windows add the weekday, " (금요일 03:00에 초기화)".
+function resetAtText(at: number, withDay: boolean): string {
   const d = new Date(at)
   const pad = (n: number) => String(n).padStart(2, '0')
-  return ` (${'일월화수목금토'[d.getDay()]}요일 ${pad(d.getHours())}:${pad(d.getMinutes())} 재설정)`
+  const day = withDay ? `${'일월화수목금토'[d.getDay()]}요일 ` : ''
+  return ` (${day}${pad(d.getHours())}:${pad(d.getMinutes())}에 초기화)`
 }
 
 // A window whose reset has passed since the reading is dropped: its figure no longer holds.
@@ -145,7 +135,7 @@ function limitParts(list: RateLimit[], now: number): Part[] {
       name: LIMIT_LABELS[l.kind] ?? l.kind,
       percent: l.percentUsed,
       text: `${Math.round(l.percentUsed)}%`,
-      detail: Number.isNaN(at) ? '' : l.kind === 'seven_day' ? resetAtText(at) : untilText(at, now),
+      detail: Number.isNaN(at) ? '' : resetAtText(at, l.kind !== 'five_hour'),
       detailRank: DETAIL_RANKS[l.kind] ?? 4,
     })
   }
@@ -425,12 +415,12 @@ export const register: Register = on => {
           {parts.flatMap((part, index) => [
             ...(index === 0 ? [] : [<Text key={`divider-${part.name}`} size="body" dimColor>│</Text>]),
             // A small inset before 컨텍스트 alone, off the band's left edge.
-            <Box key={part.name} flexDirection="row" alignItems="center" gap="sm" {...(index === 0 ? { marginLeft: 0.25 } : {})}>
+            <Box key={part.name} flexDirection="row" alignItems="center" columnGap={GAPS[e.surface]} {...(index === 0 ? { marginLeft: 0.25 } : {})}>
               {fit.showsNames ? <Text size="body" dimColor>{part.name}</Text> : null}
               {fit.barWidth === 0 ? null : (
-                <Svg source={barSvg(part.percent, levelOf(part.percent), fit.barWidth)} alt={`${part.name} ${part.text}${USE}${part.detail}`} width={fit.barWidth} height={BAR_HEIGHT} />
+                <Svg source={barSvg(part.percent, levelOf(part.percent), fit.barWidth)} alt={`${part.name} ${part.text}${part.detail}`} width={fit.barWidth} height={BAR_HEIGHT} />
               )}
-              <Text size="body" dimColor>{part.text}{fit.showsUse ? USE : ''}{part.detailRank > fit.detailsDropped ? part.detail : ''}</Text>
+              <Text size="body" dimColor>{part.text}{part.detailRank > fit.detailsDropped ? part.detail : ''}</Text>
             </Box>,
           ])}
           {/* Each tag wraps with its divider, so no divider is left at a row's end. */}
@@ -454,7 +444,7 @@ export const register: Register = on => {
           return [
             ...(index === 0 ? [] : [<Text key={`divider-${part.name}`} dimColor>│</Text>]),
             <Text key={part.name}>
-              <Text dimColor>{part.name}</Text> <Text color={level === 'normal' ? 'subtle' : level}>{bar}</Text> <Text dimColor>{part.text}{USE}{part.detail}</Text>
+              <Text dimColor>{part.name}</Text> <Text color={level === 'normal' ? 'subtle' : level}>{bar}</Text> <Text dimColor>{part.text}{part.detail}</Text>
             </Text>,
           ]
         })}

@@ -2,6 +2,12 @@ import { test, expect, mock } from 'claude-code/testing'
 
 const NOW = Date.parse('2026-10-16T01:00:00Z')
 
+// A time as the band shows it, in the machine's own time zone: "03:37".
+function clock(ms: number): string {
+  const d = new Date(ms)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
 test('shows context fill in the band above the prompt on terminal and desktop', async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on)
@@ -9,7 +15,7 @@ test('shows context fill in the band above the prompt on terminal and desktop', 
   await $.session.measure({ context: { tokens: 84000, window: 200000, percent: 42 }, rateLimits: [], changed: ['context'] })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'context-band', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 9 } } as any })
-    expect(await ui.find({ type: 'Text', text: /42% 사용 \(84k \/ 200k\)/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /42% \(84k \/ 200k\)/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -25,7 +31,7 @@ test('toasts once when crossing 75% and 90%, again after dropping back', async (
   expect(toasts).toEqual(['컨텍스트 76% 사용됨', '컨텍스트 91% 사용됨', '컨텍스트 77% 사용됨'])
 })
 
-test('adds the session and weekly limits with their reset countdowns', async ($, on) => {
+test('adds the session and weekly limits with their reset times', async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on)
   on('session.measure', (_$, e) => ({ changed: e.changed }))
@@ -34,7 +40,7 @@ test('adds the session and weekly limits with their reset countdowns', async ($,
   await $.session.measure({
     context: { tokens: 294000, window: 1000000, percent: 29 },
     rateLimits: [
-      // Friday 03:00 in the machine's own time zone, a week on: shown as a time, not a countdown.
+      // Friday 03:00 in the machine's own time zone, a week on: shown with its weekday.
       { kind: 'seven_day', percentUsed: 22, resetsAt: new Date(2026, 9, 23, 3, 0).toISOString() },
       { kind: 'five_hour', percentUsed: 5, resetsAt: at((4 * 60 + 23) * 60000 + 30000) },
     ],
@@ -42,9 +48,9 @@ test('adds the session and weekly limits with their reset countdowns', async ($,
   })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'context-band', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 9 } } as any })
-    expect(await ui.find({ type: 'Text', text: /29% 사용 \(294k \/ 1000k\)/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /5% 사용 \(4시간 23분 후 재설정\)/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /22% 사용 \(금요일 03:00 재설정\)/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /29% \(294k \/ 1000k\)/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: `5% (${clock(now + (4 * 60 + 23) * 60000 + 30000)}에 초기화)` })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /22% \(금요일 03:00에 초기화\)/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -58,9 +64,9 @@ test('a session with no reading of its own shows the last one another session st
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   await $.session.measure({ context: { tokens: 20000, window: 200000, percent: 10 }, rateLimits: [], changed: ['context'] })
   const ui = await $.ui.mount({ plugin: 'context-band', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 9 } } as any })
-  expect(await ui.find({ type: 'Text', text: /41% 사용 \(1시간 30분 후 재설정\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: `41% (${clock(NOW + 90 * 60000 + 30000)}에 초기화)` })).toBeDefined()
   // The weekly window reset after that reading, so its stale figure is not shown.
-  expect(await ui.find({ type: 'Text', text: /12% 사용/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /12%/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -163,31 +169,31 @@ test('a narrow desktop band gives up one thing at a time, down to the percents a
   const mount = (bodyColumns: number) =>
     $.ui.mount({ plugin: 'context-band', surface: 'desktop', component: 'AbovePrompt', props: { ...BAND_PROPS, bodyColumns } })
 
+  const session = `9% (${clock(NOW + (2 * 60 + 37) * 60000 + 30000)}에 초기화)`
   const wide = await mount(200)
-  expect(await wide.find({ type: 'Text', text: /^22% 사용 \(221k \/ 1000k\)$/ })).toBeDefined()
-  expect(await wide.find({ type: 'Text', text: /^9% 사용 \(2시간 37분 후 재설정\)$/ })).toBeDefined()
+  expect(await wide.find({ type: 'Text', text: '22% (221k / 1000k)' })).toBeDefined()
+  expect(await wide.find({ type: 'Text', text: session })).toBeDefined()
   expect(await wide.find({ type: 'Text', text: 'main' })).toBeDefined()
   await wide.unmount()
 
   // One step in: the context's token counts go first, the rest stays.
-  const middle = await mount(130)
-  expect(await middle.find({ type: 'Text', text: /^22% 사용$/ })).toBeDefined()
-  expect(await middle.find({ type: 'Text', text: /^9% 사용 \(2시간 37분 후 재설정\)$/ })).toBeDefined()
-  expect(await middle.find({ type: 'Text', text: /^42% 사용 \(금요일 03:00 재설정\)$/ })).toBeDefined()
+  const middle = await mount(110)
+  expect(await middle.find({ type: 'Text', text: '22%' })).toBeDefined()
+  expect(await middle.find({ type: 'Text', text: session })).toBeDefined()
+  expect(await middle.find({ type: 'Text', text: '42% (금요일 03:00에 초기화)' })).toBeDefined()
   await middle.unmount()
 
-  // Tighter: the weekly reset goes next; the session's countdown, needed soonest, stays, bars whole.
-  const tighter = await mount(110)
-  expect(await tighter.find({ type: 'Text', text: /^42% 사용$/ })).toBeDefined()
-  expect(await tighter.find({ type: 'Text', text: /^9% 사용 \(2시간 37분 후 재설정\)$/ })).toBeDefined()
+  // Tighter: the weekly reset goes next; the session's reset, needed soonest, stays, bars whole.
+  const tighter = await mount(90)
+  expect(await tighter.find({ type: 'Text', text: '42%' })).toBeDefined()
+  expect(await tighter.find({ type: 'Text', text: session })).toBeDefined()
   expect(await tighter.find({ type: 'Svg', props: { width: 37 } })).toBeDefined()
   expect(await tighter.find({ type: 'Text', text: 'main' })).toBeDefined()
   await tighter.unmount()
 
-  // Tighter still: the word 사용 goes before the countdown, the bars or the branch do.
-  const terse = await mount(95)
-  expect(await terse.find({ type: 'Text', text: /^42%$/ })).toBeDefined()
-  expect(await terse.find({ type: 'Text', text: /^9% \(2시간 37분 후 재설정\)$/ })).toBeDefined()
+  // Tighter still: the session's reset goes before the bars or the branch do.
+  const terse = await mount(75)
+  expect(await terse.find({ type: 'Text', text: '9%' })).toBeDefined()
   expect(await terse.find({ type: 'Svg', props: { width: 37 } })).toBeDefined()
   expect(await terse.find({ type: 'Text', text: 'main' })).toBeDefined()
   await terse.unmount()
@@ -224,16 +230,16 @@ test('VS Code draws the desktop band: rounded bars on one row, narrowing the sam
   const wide = await mount(200)
   expect(await wide.find({ type: 'Svg', props: { width: 37 } })).toBeDefined()
   expect(await wide.find({ type: 'Box', props: { flexWrap: 'nowrap' } })).toBeDefined()
-  expect(await wide.find({ type: 'Text', text: /^4% 사용 \(38k \/ 1000k\)$/ })).toBeDefined()
+  expect(await wide.find({ type: 'Text', text: '4% (38k / 1000k)' })).toBeDefined()
   await wide.unmount()
 
   // 39 columns is what a ~540px panel reports: one of its columns is a full-width `─`, so the band
-  // keeps its names, bars and 사용 there, giving up only the details.
+  // keeps its names and bars there, giving up only the details.
   const panel = await mount(39)
   expect(await panel.find({ type: 'Text', text: '컨텍스트' })).toBeDefined()
   expect(await panel.find({ type: 'Svg', props: { width: 37 } })).toBeDefined()
-  expect(await panel.find({ type: 'Text', text: /^4% 사용$/ })).toBeDefined()
-  expect(await panel.find({ type: 'Text', text: /^27% 사용$/ })).toBeDefined()
+  expect(await panel.find({ type: 'Text', text: '4%' })).toBeDefined()
+  expect(await panel.find({ type: 'Text', text: '27%' })).toBeDefined()
   await panel.unmount()
 
   const narrow = await mount(15)
