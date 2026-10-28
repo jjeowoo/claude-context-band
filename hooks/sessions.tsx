@@ -57,6 +57,8 @@ type OwnRecord = { title: string; lastFocusedAt: number; question: string | null
 type Cached = { stamp: string; value: OwnRecord | null }
 
 let recordCache: Cached | null = null
+// Where this session's record was last found.
+let foundPath: string | null = null
 // The main loop's tool calls now running, by id: the tool, when it started, and whether a permission
 // dialog was put to the person for it.
 const calls = new Map<string, { tool: string; at: number; isAsked: boolean }>()
@@ -65,7 +67,10 @@ let asked: { title: string; at: number } | null = null
 let isRenaming = false
 let pausedUntil = 0
 
-// Where the app keeps this session's record; null outside a desktop session.
+// Where the app keeps this session's record; null outside a desktop session. The app has moved its
+// data before (on Windows, from `%APPDATA%\Claude` to a folder per installed app under
+// `%LOCALAPPDATA%\Claude-Data`), so the record is looked for in each folder it may be in, newest
+// layout first, and the one found kept until it is gone.
 async function recordPath($: EngineInterface): Promise<string | null> {
   const selfId = await $.env.get('CLAUDE_CODE_HOST_SESSION_ID')
   const account = await $.env.get('CLAUDE_CODE_ACCOUNT_UUID')
@@ -74,8 +79,31 @@ async function recordPath($: EngineInterface): Promise<string | null> {
   if (selfId === undefined || account === undefined || org === undefined || home === undefined) {
     return null
   }
-  const appData = (await $.env.get('APPDATA')) ?? `${home}/Library/Application Support`
-  return `${appData}/Claude/claude-code-sessions/${account}/${org}/${selfId}.json`.replace(/\\/g, '/')
+  if (foundPath !== null && (await isFile($, foundPath))) {
+    return foundPath
+  }
+  const dataDirs: string[] = []
+  const localAppData = await $.env.get('LOCALAPPDATA')
+  if (localAppData !== undefined) {
+    const root = `${localAppData}/Claude-Data`
+    const entries = await $.fs.list(root).catch(() => [])
+    dataDirs.push(...entries.filter(entry => entry.kind === 'dir').map(entry => `${root}/${entry.name}`))
+  }
+  dataDirs.push(`${(await $.env.get('APPDATA')) ?? `${home}/Library/Application Support`}/Claude`)
+  const paths = dataDirs.map(dir => `${dir}/claude-code-sessions/${account}/${org}/${selfId}.json`.replace(/\\/g, '/'))
+  for (const path of paths) {
+    if (await isFile($, path)) {
+      foundPath = path
+      return path
+    }
+  }
+  // Not written yet: the first place it may be, looked for again on the next refresh.
+  foundPath = null
+  return paths[0]
+}
+
+async function isFile($: EngineInterface, path: string): Promise<boolean> {
+  return $.fs.stat(path).then(stat => stat.kind === 'file', () => false)
 }
 
 function toRecord(data: unknown): OwnRecord | null {

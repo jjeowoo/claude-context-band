@@ -28,8 +28,13 @@ function mockDisk(on: any, clock: { now: () => number }, files: Record<string, u
   on('fs.list', (_$: unknown, e: { path: string }) => {
     const dir = `${norm(e.path)}/`
     const names = [...disk.keys()].filter(path => path.startsWith(dir) && !path.slice(dir.length).includes('/'))
-    if (names.length === 0) missing(e.path)
-    return { value: names.map(path => ({ name: path.slice(dir.length), kind: 'file', size: disk.get(path)!.text.length, mtimeMs: disk.get(path)!.mtimeMs, isLink: false })) }
+    // A folder holding a file at any depth below.
+    const dirs = new Set([...disk.keys()].filter(path => path.startsWith(dir) && path.slice(dir.length).includes('/')).map(path => path.slice(dir.length).split('/')[0]))
+    if (names.length === 0 && dirs.size === 0) missing(e.path)
+    return { value: [
+      ...names.map(path => ({ name: path.slice(dir.length), kind: 'file', size: disk.get(path)!.text.length, mtimeMs: disk.get(path)!.mtimeMs, isLink: false })),
+      ...[...dirs].map(name => ({ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false })),
+    ] }
   })
   on('fs.read', (_$: unknown, e: { path: string }) => ({ value: (disk.get(norm(e.path)) ?? missing(e.path)).text }))
   on('fs.write', (_$: unknown, e: { path: string; text: string }) => {
@@ -48,7 +53,7 @@ function put(disk: Disk, clock: { now: () => number }, path: string, change: (da
 type Screen = { isShown: boolean }
 
 // The engine of a desktop session whose app renames it as asked, and the titles asked for.
-function startEngine(on: any, disk: Disk, clock: { now: () => number }, decision = 'allow', screen: Screen = { isShown: false }): string[] {
+function startEngine(on: any, disk: Disk, clock: { now: () => number }, decision = 'allow', screen: Screen = { isShown: false }, record = RECORD): string[] {
   const renames: string[] = []
   on('session.start', (_$: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.surfaces', () => ({ value: screen.isShown ? ['desktop'] : [] }))
@@ -59,13 +64,13 @@ function startEngine(on: any, disk: Disk, clock: { now: () => number }, decision
   on('tool.check', () => ({ decision }))
   on('tool.call', { tool: RENAME_TOOL }, (_$: unknown, e: { title: string }) => {
     renames.push(e.title)
-    put(disk, clock, RECORD, data => ({ ...data, title: e.title }))
+    put(disk, clock, record, data => ({ ...data, title: e.title }))
     return { result: { content: 'renamed' } }
   })
   return renames
 }
 
-const titleOf = (disk: Disk) => JSON.parse(disk.get(RECORD)!.text).title
+const titleOf = (disk: Disk, record = RECORD) => JSON.parse(disk.get(record)!.text).title
 
 test('marks its title working through a turn, done once it ends off screen, and plain once opened again', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
@@ -98,6 +103,29 @@ test('marks its title working through a turn, done once it ends off screen, and 
   screen.isShown = false
   await clock.advance(MIN)
   expect(titleOf(disk)).toBe('세션 패널')
+})
+
+test('finds its record where the app keeps its data now, in a folder of its own under Claude-Data', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on)
+  mock.env(on, { ...DESKTOP_ENV, LOCALAPPDATA: String.raw`C:\Users\u\AppData\Local` })
+  const record = 'C:/Users/u/AppData/Local/Claude-Data/claude_pkg/claude-code-sessions/acc/org/local_self.json'
+  // The old folder keeps only the app's note that the data has left.
+  const disk = mockDisk(on, clock, {
+    [record]: { sessionId: 'local_self', title: '시간 추적', lastFocusedAt: NOW - MIN },
+    'C:/Users/u/AppData/Roaming/Claude/.user-data-left': {},
+  })
+  const renames = startEngine(on, disk, clock, 'allow', { isShown: false }, record)
+
+  await $.session.start({ cwd: 'C:/work', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await clock.settle()
+  expect(titleOf(disk, record)).toBe('🔵 시간 추적')
+
+  await clock.advance(MIN)
+  await $.turn.complete({ answer: 'done', durationMs: MIN, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.settle()
+  expect(renames).toEqual(['🔵 시간 추적', '✅ 시간 추적'])
 })
 
 test('a session on screen as its turn ends gets no done mark, then or after the person leaves it', async ($, on) => {
